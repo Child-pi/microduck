@@ -594,123 +594,150 @@
             </div>
         </section>
 
-        <!-- Section 3: Math Foundations -->
+        <!-- Section 3: Math Foundations Deep Dive -->
         <section id="math-foundations">
-            <h2 class="section-heading"><span class="sec-num">03</span> 數學概念與程式碼對應實作</h2>
+            <h2 class="section-heading"><span class="sec-num">03</span> 數學概念與程式碼對應實作 (Math to Code Mapping)</h2>
             <p>
-                強化學習的嚴謹數學基礎建立在<strong>馬可夫決策過程 (Markov Decision Process, MDP)</strong> 之上。MDP 定義為一個五元組：
+                強化學習不是玄學黑盒子，它背後是嚴謹的<strong>泛函分析、隨機過程與古典剛體動力學</strong>。為了讓演算法能夠被電腦執行，我們將機器人與物理世界的互動嚴格建模為<strong>馬可夫決策過程 (Markov Decision Process, MDP)</strong>：
             </p>
             <div class="math-block">
-                $$\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, \mathcal{P}, \mathcal{R}, \gamma angle$$
+                $$\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, \mathcal{P}, \mathcal{R}, \gamma \rangle$$
             </div>
 
+            <h3 class="subsection-heading">1. 狀態空間 \(\mathcal{S}\) 的幾何數學與程式對應 (61 維度)</h3>
+            <p>
+                為什麼小鴨的觀察值恰好是 61 個浮點數？這並非隨機湊數，而是依據<strong>剛體運動學與非完整約束</strong>的嚴謹推導：
+            </p>
             <div class="table-responsive">
                 <table>
                     <thead>
                         <tr>
                             <th>數學符號</th>
-                            <th>數學定義</th>
-                            <th>Microduck 程式碼實作對應</th>
-                            <th>物理與程式含義</th>
+                            <th>維度與定義</th>
+                            <th>程式碼實作對應 (microduck_env.py)</th>
+                            <th>深層物理幾何原理與為何這樣設計</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
-                            <td>\(\mathcal{S}\)</td>
-                            <td>狀態空間 (State Space)</td>
-                            <td><code>self.observation_space = spaces.Box(-inf, inf, (61,))</code></td>
-                            <td>61 維度向量，包含 IMU 角速度、投影重力、14 關節位置/速度、歷史動作、速度指令。</td>
+                            <td>\(\boldsymbol{\omega}_{trunk} \in \mathbb{R}^3\)</td>
+                            <td>3 維 (0..2)<br>軀幹角速度</td>
+                            <td><code>site_mat = self.data.site_xmat[imu_id].reshape(3,3)<br>obs[0:3] = site_mat.T @ self.data.qvel[3:6]</code></td>
+                            <td><strong>旋轉慣性反饋</strong>：使用座標變換矩陣 \(R^T \boldsymbol{\omega}_{world}\) 將世界座標角速度旋轉至 IMU 局部坐標系。當小鴨受到側向推力時，角速度第一時間響應，是防止翻覆的最前線指標。</td>
                         </tr>
                         <tr>
-                            <td>\(\mathcal{A}\)</td>
-                            <td>動作空間 (Action Space)</td>
-                            <td><code>self.action_space = spaces.Box(-1.0, 1.0, (14,))</code></td>
-                            <td>14 維度向量，介於 \([-1.0, +1.0]\) 之間，代表 14 個關節的目標角度偏置量。</td>
+                            <td>\(\mathbf{g}_{proj} \in \mathbb{R}^3\)</td>
+                            <td>3 維 (3..5)<br>重力投影向量</td>
+                            <td><code>obs[3:6] = site_mat.T @ np.array([0.0, 0.0, -1.0])</code></td>
+                            <td><strong>無萬向鎖姿態表示</strong>：傳統歐拉角 (Roll, Pitch, Yaw) 存在 \(\pm \pi\) 週期不連續性與奇異點萬向鎖 (Gimbal Lock)。將重力向量 \([0, 0, -1]^T\) 投影至軀幹局部座標系，平滑連續且直接反映重力方向：\(g_x < 0\) 為前傾、\(g_x > 0\) 為後仰、\(g_y\) 為左右側傾。</td>
                         </tr>
                         <tr>
-                            <td>\(\mathcal{P}(s' \mid s, a)\)</td>
-                            <td>狀態轉移機率矩陣</td>
-                            <td><code>mujoco.mj_step(self.model, self.data)</code> (重複 10 次)</td>
-                            <td>由 MuJoCo 物理引擎根據剛體動力學、牛頓-歐拉方程與約束求解器確定性地推演新狀態。</td>
+                            <td>\(\Delta \mathbf{q} \in \mathbb{R}^{14}\)</td>
+                            <td>14 維 (6..19)<br>關節位置偏差</td>
+                            <td><code>obs[6:20] = self.data.qpos[7:21] - DEFAULT_JOINT_POS</code></td>
+                            <td><strong>相對於穩定站姿 (STAND2) 的偏差</strong>：直接輸入絕對角度會讓神經網絡必須先死記「基準站姿數值」。輸入相對偏差 \(\Delta q\) 使輸入圍繞在 0 附近，符合深度網絡零均值 (Zero-Centered) 的最佳數值分佈。</td>
                         </tr>
                         <tr>
-                            <td>\(\mathcal{R}(s, a, s')\)</td>
-                            <td>回饋獎勵函數</td>
-                            <td><code>def _compute_reward(self, action): ...</code></td>
-                            <td>純量值，由前進速度追蹤、左右搖擺、前後點頭、高度維持及各項罰項組合而成。</td>
+                            <td>\(\dot{\mathbf{q}} \in \mathbb{R}^{14}\)</td>
+                            <td>14 維 (20..33)<br>關節角速度</td>
+                            <td><code>obs[20:34] = self.data.qvel[6:20]</code></td>
+                            <td><strong>關節動量感知</strong>：單知位置不足以預測下一步，結合 \(\Delta q\) 與 \(\dot{q}\) 構成完整的相空間 (Phase Space)，讓策略學會利用關節阻尼與彈性。</td>
                         </tr>
                         <tr>
-                            <td>\(\gamma\)</td>
-                            <td>折扣因子 (Discount Factor)</td>
-                            <td><code>gamma=0.9991</code></td>
-                            <td>決定演算法對「未來長遠回報」的重視程度，直接決定小鴨的耐力規劃視野。</td>
+                            <td>\(\mathbf{a}_{t-1} \in \mathbb{R}^{14}\)</td>
+                            <td>14 維 (34..47)<br>前一刻動作記憶</td>
+                            <td><code>obs[34:48] = self.last_action</code></td>
+                            <td><strong>還原馬可夫性 (Markovian Property)</strong>：真實機器人的通訊與舵機物理響應存在 1~2 個控制週期的時間延遲 (Actuator Delay)。系統因此具備非馬可夫歷史依賴性。將 \(a_{t-1}\) 納入狀態構建<strong>增廣狀態 (Augmented State)</strong>，使系統重新滿足一階馬可夫假設，並能嚴格懲罰動作跳變 \(\|a_t - a_{t-1}\|^2\)。</td>
+                        </tr>
+                        <tr>
+                            <td>\(\mathbf{c} \in \mathbb{R}^{13}\)</td>
+                            <td>13 維 (48..60)<br>目標控制指令</td>
+                            <td><code>obs[48:61] = self.commands</code></td>
+                            <td><strong>條件策略 (Goal-Conditioned Policy)</strong>：包含目標前進速度 \(v_x\)、側向速度 \(v_y\)、轉彎偏航率 \(\omega_z\)、頭頸偏置及身體姿態偏置。讓同一套神經網絡能聽從搖桿指令隨心行走與轉向。</td>
                         </tr>
                     </tbody>
                 </table>
             </div>
 
-            <h3 class="subsection-heading">狀態轉移動力學：從動作到物理力矩</h3>
+            <h3 class="subsection-heading">2. PD 控制器力矩公式的物理本質與分層控制架構</h3>
             <p>
-                神經網路輸出的動作 \(a_t \in [-1, 1]^{14}\) 並非直接施加在關節上的力量，而是<strong>關節目標角度 (Target Joint Position)</strong>。程式透過線性縮放映射：
+                神經網絡輸出的動作並不是直接通電給馬達的電流或扭矩，而是<strong>關節期望位置 (Target Position)</strong>。這背後貫徹了機器人學極其核心的<strong>「高層大腦策略 (50 Hz) 與底層物理彈簧阻尼 (500 Hz) 解耦分層」</strong>思想：
             </p>
             <div class="math-block">
-                $$q_{des} = q_{nominal} + 	ext{action\_scale} \cdot a_t$$
+                $$q_{des, i} = q_{nominal, i} + \alpha \cdot a_{t, i} \quad (\alpha = \text{action\_scale} = 0.5)$$
+                $$\tau_i = K_p (q_{des, i} - q_i) - K_d \dot{q}_i$$
             </div>
-            <p>
-                隨後在 <code>models/scene_walk.xml</code> 中，MuJoCo 的馬達驅動器實作了經典的 <strong>PD 控制器 (Proportional-Derivative Control)</strong>：
-            </p>
-            <div class="math-block">
-                $$	au_i = K_p (q_{des, i} - q_i) - K_d \dot{q}_i$$
+
+            <div class="card-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">⚙️</span>
+                        <div class="card-title">虛擬彈簧-阻尼器模型 (Virtual Spring-Damper)</div>
+                    </div>
+                    <p>
+                        式中的 \(K_p\) 等效於在期望角度與當前角度之間掛了一根<strong>「虛擬彈簧」</strong>，偏差越大，拉力越大；\(K_d\) 則是一支<strong>「黏性阻尼器」</strong>，轉速越快，反向阻力越大。
+                    </p>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">⚡</span>
+                        <div class="card-title">為什麼不讓神經網路直接輸出扭矩 \(\tau\)？</div>
+                    </div>
+                    <p>
+                        若神經網路直接輸出扭矩，在 50 Hz 下一旦遇到腳尖撞擊地面，未即時微調的扭矩會使足部產生劇烈彈跳。而位置 PD 控制具有<strong>天生內建的被動柔順性 (Passive Compliance)</strong>，地面撞擊會自然壓縮虛擬彈簧吸收衝擊，大幅降低策略學習難度。
+                    </p>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">🎯</span>
+                        <div class="card-title">動作縮放係數 \(\alpha = 0.5\) 的物理意義</div>
+                    </div>
+                    <p>
+                        限制神經網絡對標準站姿的偏移量最大為 \(\pm 0.5\) 弧度（約 \(\pm 28.6^\circ\)）。這從物理根本上封殺了「關節反折」、「過度自鎖」等危險動作，保護伺服減速齒輪箱。
+                    </p>
+                </div>
             </div>
-            <p>
-                其中 \(K_p\) 為比例剛度 (Stiffness)，\(K_d\) 為阻尼係數 (Damping)。這種將神經網路與底層高頻 PD 控制解耦的架構，是現代雙足機器人能夠平穩行走且具備 Sim2Real（模擬轉真實）能力的工業界黃金標準。
-            </p>
         </section>
 
-        <!-- Section 4: PPO Theory -->
+        <!-- Section 4: PPO Theory Deep Dive -->
         <section id="ppo-theory">
-            <h2 class="section-heading"><span class="sec-num">04</span> PPO 近端策略最佳化與長遠視野規劃</h2>
-            <p>
-                Microduck 使用的是 OpenAI 提出的 <strong>近端策略最佳化 (Proximal Policy Optimization, PPO)</strong> 演算法。
-            </p>
+            <h2 class="section-heading"><span class="sec-num">04</span> PPO 演算法與長遠規劃視野定理深入推導</h2>
 
-            <h3 class="subsection-heading">1. 策略裁剪目標函數 (Clipped Surrogate Objective)</h3>
+            <h3 class="subsection-heading">1. 長遠規劃視野定理 (Effective Planning Horizon Theorem) 完整數學證明</h3>
             <p>
-                在傳統策略梯度 (Policy Gradient) 中，若一次梯度更新幅度過大，策略容易崩潰且無法恢復。PPO 引入了<strong>機率比率裁剪機制</strong>：
+                許多強化學習初學者常對「為什麼改一個小小的 \(\gamma\) 就能讓行走時間從 4 秒倍增到 20 秒」感到不解。以下給出嚴格的數學推導：
+            </p>
+            <p>
+                在強化學習中，目標是最大化自時間點 \(t\) 開始的<strong>累積折扣總回報 (Discounted Return)</strong> \(G_t\)：
             </p>
             <div class="math-block">
-                $$r_t(	heta) = rac{\pi_	heta(a_t \mid s_t)}{\pi_{	heta_{old}}(a_t \mid s_t)}$$
-                $$L^{CLIP}(	heta) = \hat{\mathbb{E}}_t \left[ \min\left( r_t(	heta)\hat{A}_t, \, 	ext{clip}(r_t(	heta), 1-\epsilon, 1+\epsilon)\hat{A}_t ight) ight]$$
+                $$G_t = \sum_{k=0}^{\infty} \gamma^k r_{t+k+1} = r_{t+1} + \gamma r_{t+2} + \gamma^2 r_{t+3} + \dots + \gamma^k r_{t+k+1} + \dots$$
             </div>
             <p>
-                其中 \(\epsilon = 0.2\)。當優勢 \(\hat{A}_t > 0\)（代表該動作優於平均）時，演算法鼓勵增加該動作的機率，但最多只允許增加到 \(1+\epsilon = 1.2\) 倍，防止步子邁得太大扯破蛋。
-            </p>
-
-            <h3 class="subsection-heading">2. 廣義優勢估計 (GAE - Generalized Advantage Estimation)</h3>
-            <p>
-                如何客觀評價「第 \(t\) 步到底走得好不好」？PPO 使用 Critic 價值網絡 \(V_\phi(s)\) 計算時間差分誤差 (TD-error)：
+                假設在平穩站立行走過程中，小鴨每一步獲得穩定的生存與速度獎勵 \(r_t \approx \bar{r}\)。則回報展開為無窮等比級數：
             </p>
             <div class="math-block">
-                $$\delta_t^V = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)$$
-                $$\hat{A}_t^{GAE} = \sum_{l=0}^\infty (\gamma \lambda)^l \delta_{t+l}^V$$
+                $$G_t \approx \bar{r} \sum_{k=0}^{\infty} \gamma^k = \bar{r} \left( 1 + \gamma + \gamma^2 + \gamma^3 + \dots \right)$$
             </div>
             <p>
-                在此處，\(\lambda = 0.95\) 在偏差 (Bias) 與方差 (Variance) 之間取得平衡。
+                由於 \(0 < \gamma < 1\)，利用公比小於 1 的無窮等比級數求和公式：
             </p>
+            <div class="math-block">
+                $$\sum_{k=0}^{\infty} \gamma^k = \frac{1}{1 - \gamma} \implies \text{有效規劃視野 (Effective Horizon in Steps)} = H = \frac{1}{1 - \gamma}$$
+            </div>
+            <p>
+                由於控制週期 \(\Delta t = 0.002\text{s} \times 10 = 0.02\text{s}\)（50 Hz 控制頻率），有效時間視野為：
+            </p>
+            <div class="math-block">
+                $$T_{\text{horizon}} = H \cdot \Delta t = \frac{0.02}{1 - \gamma} \text{ 秒}$$
+            </div>
 
-            <h3 class="subsection-heading">3. 折扣因子 \(\gamma\) 與行走時間的數學關聯：為何能突破 20 秒？</h3>
-            <div class="callout warning">
-                <div class="callout-title">⚠️ 為什麼早期的訓練總在 4~6 秒停滯不前？</div>
-                <p>
-                    許多工程師習慣直接使用 Reinforcement Learning 教科書預設的 \(\gamma = 0.99\)。但在控制頻率 50 Hz（步長 \(\Delta t = 0.02\) 秒）的環境下：
-                </p>
-                <div class="math-block">
-                    $$	ext{有效規劃視野 (Steps)} = \sum_{t=0}^\infty \gamma^t = rac{1}{1 - \gamma} = rac{1}{1 - 0.99} = 100 	ext{ steps}$$
-                    $$	ext{有效時間視野 (Seconds)} = 100 	imes 0.02	ext{s} = 2.0 	ext{ 秒}$$
-                </div>
-                <p>
-                    這意味著大腦<strong>「只在乎未來 2 秒內會不會摔倒」</strong>！當小鴨走到第 4 秒時，2 秒前累積的微小骨盆側傾已經滾雪球擴大，神經網路卻毫無預警，最終必然在 4~6 秒傾覆。
-                </p>
+            <h3 class="subsection-heading">2. 「獎勵半衰期」與雙足倒立擺翻覆動力學的物理本質</h3>
+            <p>
+                未來第 \(k\) 步的獎勵權重為 \(\gamma^k\)。我們定義獎勵衰減至剩下 \(50\%\) 所需的步數為<strong>半衰期 (Half-Life)</strong> \(k_{1/2}\)：
+            </p>
+            <div class="math-block">
+                $$\gamma^{k_{1/2}} = 0.5 \implies k_{1/2} = \frac{\ln(0.5)}{\ln(\gamma)}$$
             </div>
 
             <div class="table-responsive">
@@ -718,87 +745,101 @@
                     <thead>
                         <tr>
                             <th>折扣因子 \(\gamma\)</th>
-                            <th>有效視野步數 (Steps)</th>
-                            <th>物理時間視野 (Seconds)</th>
-                            <th>實測表現</th>
+                            <th>有效視野步數 \(H\)</th>
+                            <th>物理時間視野 \(T_{horizon}\)</th>
+                            <th>50% 獎勵半衰期時間</th>
+                            <th>雙足小鴨在該視野下的動態行為本質</th>
                         </tr>
                     </thead>
                     <tbody>
                         <tr>
                             <td><code>0.9900</code></td>
                             <td>100 步</td>
-                            <td>2.0 秒</td>
-                            <td>走 4 秒即向前仆街摔倒，無法穩定行走。</td>
+                            <td><strong>2.0 秒</strong></td>
+                            <td>1.38 秒</td>
+                            <td>
+                                <strong>極度短視 (Myopic)</strong>：小鴨大腦只關心未來 1~2 秒的安危。雙足倒立擺模型 (Linear Inverted Pendulum) 的失衡動量累積往往需要 3~4 秒才會徹底失控。因為短視，神經網路在第 1~2 秒為了追求前進速度而瘋狂跨大步，完全無視這會造成 3 秒後的骨盆側傾滾雪球崩潰。<strong>實測 4 秒必摔！</strong>
+                            </td>
                         </tr>
                         <tr>
                             <td><code>0.9985</code></td>
                             <td>667 步</td>
-                            <td>13.3 秒</td>
-                            <td>穩定性大幅躍升，達成 <strong>10.52 秒</strong>行走冠軍紀錄。</td>
+                            <td><strong>13.3 秒</strong></td>
+                            <td>9.24 秒</td>
+                            <td>
+                                <strong>中程穩態 (Medium Horizon)</strong>：視野延伸至 13 秒。策略開始意識到「現在猛踩油門會導致 8 秒後煞不住摔跤」，主動學會收斂步伐頻率，將重心鎖定在穩定錐內，成功達成 <strong>10.52 秒冠軍紀錄</strong>。
+                            </td>
                         </tr>
                         <tr>
                             <td><strong style="color:var(--accent-secondary);">0.9991</strong> (最新升級)</td>
                             <td><strong>1,111 步</strong></td>
                             <td><strong>22.2 秒</strong></td>
-                            <td>具備超過 20 秒的長期動態穩定預測能力，成功跨越 20 秒大關！</td>
+                            <td><strong>15.4 秒</strong></td>
+                            <td>
+                                <strong>遠期預測自救 (Far-Sighted Endurance)</strong>：視野高達 22.2 秒！在邁步第 5 秒時，若遇到微小側傾擾動，小鴨寧可暫時犧牲單步進度，主動透過調整踝關節蹼足角度進行自救修正，確保 20 秒後的巨大生存回報。<strong>成功超越 20 秒大關！</strong>
+                            </td>
                         </tr>
                     </tbody>
                 </table>
             </div>
         </section>
 
-        <!-- Section 5: Reward Shaping -->
+        <!-- Section 5: Reward Shaping Deep Dive -->
         <section id="reward-shaping">
-            <h2 class="section-heading"><span class="sec-num">05</span> 仿生步態獎勵塑形 (Biomimetic Reward Shaping)</h2>
+            <h2 class="section-heading"><span class="sec-num">05</span> 仿生步態獎勵塑形深層剖析 (Duck Mimicry Rewards Deep Dive)</h2>
+
+            <h3 class="subsection-heading">1. 左右可愛搖擺步態 (Duck Waddle) 的生物力學與數學推導</h3>
             <p>
-                機器人不會自己無緣無故變成鴨子。要想讓它具有鴨子的生動形態，必須透過<strong>多目標複合獎勵塑形 (Multi-Objective Reward Shaping)</strong>。
+                在鳥類解剖學中，雁鴨科（Anatidae）具有<strong>寬骨盆 (Wide Pelvis)</strong>、<strong>短股骨 (Short Femur)</strong> 與<strong>寬大蹼足 (Webbed Feet)</strong>。當鴨子抬起左腳邁步向前時，重力會產生強大的順時針力矩。如果身體維持垂直不倒，單腳支撐線與重心 (CoM) 不重合，必定會向空中的擺動腿一側翻倒！
+            </p>
+            <p>
+                因此，<strong>左右搖擺 (Lateral Sway) 是短腿雙足動物實現動態平衡的物理必然，而非缺陷！</strong>
             </p>
 
-            <h3 class="subsection-heading">1. 左右可愛搖擺步態數學模型 (Duck Waddling)</h3>
+            <div class="math-block">
+                $$\mathbf{1}_{Left\_Contact} = \begin{cases} 1, & \text{左腳著地} \\ 0, & \text{左腳離地} \end{cases}, \quad \mathbf{1}_{Right\_Contact} = \begin{cases} 1, & \text{右腳著地} \\ 0, & \text{右腳離地} \end{cases}$$
+                $$w_{target} = 0.045 \cdot \left( \mathbf{1}_{Left\_Contact} - \mathbf{1}_{Right\_Contact} \right) \quad (\text{rad})$$
+                $$r_{duck\_waddle} = 2.0 \cdot \exp\left( - \frac{(g_y - w_{target})^2}{\sigma_{waddle}^2} \right) \quad (\sigma_{waddle}^2 = 0.003)$$
+            </div>
+
             <p>
-                真實鴨子由於骨盆寬大且腿部短小，在單腳支撐期 (Single-Support Phase) 必須將身體重心微微側傾至支撐腳上方，形成標誌性的左右搖擺步態。
+                <strong>高斯核函數的精妙特性</strong>：
+                當實際側傾 \(g_y\) 完全吻合期望搖擺角 \(w_{target}\) 時，指數項為 0，獲得滿分 \(+2.0\)；當偏差增大時，獎勵呈高斯鐘形曲線平滑衰減，並提供指向 \(w_{target}\) 的平滑導數梯度：
             </p>
             <div class="math-block">
-                $$w_{target} = 0.045 \cdot \left( \mathbf{1}_{Left\_Contact} - \mathbf{1}_{Right\_Contact} ight)$$
-                $$r_{duck\_waddle} = 2.0 \cdot \exp\left( - rac{(g_y - w_{target})^2}{0.003} ight)$$
+                $$\frac{\partial r_{duck\_waddle}}{\partial g_y} = -2.0 \cdot \frac{2(g_y - w_{target})}{\sigma_{waddle}^2} \exp\left( - \frac{(g_y - w_{target})^2}{\sigma_{waddle}^2} \right)$$
             </div>
             <p>
-                其中 \(g_y\) 是透過 IMU 測得的重力向量在軀幹橫向軸上的投影分量。當左腳著地時，目標側傾角為向左 \(-0.045\) rad（約 \(2.6^\circ\)）；右腳著地時則向右傾斜。程式碼實作如下：
+                這個負反饋梯度會像一隻無形的手，驅動小鴨在左腳著地時向左微擺 \(2.6^\circ\)，右腳著地時向右微擺 \(2.6^\circ\)，形成可愛生動的<strong>小鴨搖擺小碎步</strong>！
             </p>
-            <pre><code># 判斷雙腳著地接觸
-waddle_target = 0.045 * (1.0 if (left_contact and not right_contact) else (-1.0 if (right_contact and not left_contact) else 0.0))
-rew_duck_waddle = 2.0 * float(np.exp(-np.square(proj_grav_y - waddle_target) / 0.003))
 
-# 放寬常規的側傾重罰，只在傾斜過大 (|gy| > 0.11) 真正快倒時才開罰
-if abs(proj_grav_y) > 0.11:
-    cost_roll_lean = -8.0 * float(abs(proj_grav_y) - 0.11)</code></pre>
-
-            <h3 class="subsection-heading">2. 鴨子前後節奏點頭模型 (Head Bobbing)</h3>
+            <h3 class="subsection-heading">2. 鴨子前後節奏點頭模型 (Head Bobbing) 的視動機制</h3>
             <p>
-                鴨子在行走時，頭部與頸部會伴隨腳步起伏前後點頭（有助於穩定視野與慣性動量平衡）。
+                真實鴨子行走時點頭並非純粹裝可愛，而是為了<strong>「視動眼震 (Optokinetic Response)」</strong>：在推進行走時，頭部在空中向前刺出並短暫鎖定在空間中，使視網膜成像保持靜止（便於觀察捕食者與食物），隨後軀幹跟上。
             </p>
             <div class="math-block">
-                $$r_{duck\_bob} = 1.5 \cdot \exp\left( - rac{(q_{neck\_pitch} + q_{head\_pitch} - 0.18)^2}{0.015} ight) - 0.8 \cdot (q_{head\_yaw}^2 + q_{head\_roll}^2)$$
+                $$r_{duck\_bob} = 1.5 \cdot \exp\left( - \frac{(q_{neck\_pitch} + q_{head\_pitch} - 0.18)^2}{0.015} \right) - 0.8 \cdot \left( q_{head\_yaw}^2 + q_{head\_roll}^2 \right)$$
             </div>
             <p>
-                這項數學公式獎勵頸部與頭部維持約 \(0.18\) rad（約 \(10.3^\circ\)）微向前伸的警覺點頭姿態，同時嚴厲懲罰左右歪頭與旋轉 (\(q_{yaw}, q_{roll}\))，保證小鴨走路時目光永遠專注朝前。
+                這項公式將頸部關節 (Joint 5) 與頭部關節 (Joint 6) 綁定為同向協同運動，維持微向前伸的警覺點頭姿態，同時嚴厲懲罰左右歪頭 (\(q_{yaw}, q_{roll}\))，保證喙部始終水平向前。
             </p>
 
-            <h3 class="subsection-heading">3. 20 秒階梯式生存激勵階梯 (Survival Milestone Ladder)</h3>
-            <p>
-                為了徹底攻克 20 秒大關，我們打破傳統固定數值的生存獎勵，設計了<strong>指數級遞增的階梯式激勵</strong>：
-            </p>
-            <div class="math-block">
-                $$r_{survival}(t) = egin{cases} 
-                +5.0, & 0 \le t < 10	ext{ 秒} \quad (0 \sim 500 	ext{ 步}) \
-                +8.0, & 10 \le t < 15	ext{ 秒} \quad (500 \sim 750 	ext{ 步}) \
-                +15.0, & 15 \le t < 20	ext{ 秒} \quad (750 \sim 1000 	ext{ 步}) \
-                \mathbf{+25.0}, & t \ge 20	ext{ 秒} \quad (1000+ 	ext{ 步，超越極限里程碑})
-                \end{cases}$$
+            <h3 class="subsection-heading">3. 20 秒階梯式生存激勵 (Survival Ladder) 如何打破指數衰減？</h3>
+            <div class="callout success">
+                <div class="callout-title">💡 傳統固定生存獎勵的致命缺陷：後續誘因指數歸零</div>
+                <p>
+                    傳統 RL 常設固定步長獎勵 \(r_{step} = +1.0\)。但在時間點 \(t=1000\) 步（第 20 秒）時，其折算回第 0 步的現值僅為：
+                </p>
+                <div class="math-block">
+                    $$\text{現值} = \gamma^{1000} \cdot 1.0 = (0.9991)^{1000} \approx 0.406$$
+                </div>
+                <p>
+                    如果步長只有 2 秒（\(\gamma=0.99\)），第 1000 步的現值更是 \((0.99)^{1000} = 0.000043\)（近乎為 0，完全沒有任何激勵效果）！
+                </p>
+                <p>
+                    <strong>階梯式激勵破解法</strong>：我們將第 20 秒以上的單步獎勵提升至 <strong>\(+25.0\)</strong>（成長 500%！）。其折現後的現值仍然高達 \(0.406 \times 25.0 \approx 10.15\)！這在整個價值網絡 \(V(s)\) 中形成了強大的<strong>「漏斗引力場」</strong>，吸引小鴨大腦全力朝著 20 秒的大關奮勇邁進！
+                </p>
             </div>
-            <p>
-                這讓神經網路深刻理解：<strong>「只要能多撐 1 秒邁過 20 秒大關，就能獲得呈倍數暴增的巨額獎賞」</strong>，從而在後期展現出驚人的防倒自救能力！
-            </p>
         </section>
 
         <!-- Section 6: I/O Parameters -->
