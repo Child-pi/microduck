@@ -90,11 +90,12 @@ class MicroduckEnv(gym.Env):
         model_path: Optional[str] = None,
         frame_skip: int = 10,  # 10 * 0.002s = 0.02s (50 Hz control)
         action_scale: float = 0.5,
-        max_episode_steps: int = 1000,
+        max_episode_steps: int = 1500,  # 1500 steps * 0.02s = 30.0s (enables 20s+ breakthrough!)
         render_mode: Optional[str] = None,
         render_width: int = 640,
         render_height: int = 480,
         command_ranges: Optional[Dict[str, Tuple[float, float]]] = None,
+        duck_mimic_mode: bool = True,   # Biomimetic duck waddle and head-bobbing motion
     ):
         super().__init__()
 
@@ -116,6 +117,7 @@ class MicroduckEnv(gym.Env):
         self.render_mode = render_mode
         self.render_width = render_width
         self.render_height = render_height
+        self.duck_mimic_mode = duck_mimic_mode
 
         # Cache IDs
         self.imu_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "imu")
@@ -356,14 +358,51 @@ class MicroduckEnv(gym.Env):
             elif left_contact and right_contact:
                 rew_stepping = 0.2
 
-        # 5. Upright orientation and strict pitch/roll control
+        # 5. Upright orientation and posture control
         obs = self._get_obs()
         proj_grav_x = obs[3]  # Pitch (forward/back tilt)
         proj_grav_y = obs[4]  # Roll (lateral tilt)
         proj_grav_z = obs[5]  # Vertical axis
 
         rew_pitch = float(np.exp(-np.square(proj_grav_x) / 0.012))
-        rew_roll = float(np.exp(-np.square(proj_grav_y) / 0.012))
+
+        # --- Biomimetic Duck Motion: Waddling Sway & Head Bobbing ---
+        rew_duck_waddle = 0.0
+        rew_duck_head_bob = 0.0
+        cost_head_wobble = 0.0
+
+        joint_pos = self.data.qpos[7:21]
+
+        if self.duck_mimic_mode:
+            # 5a. Duck Waddle: Rhythmic alternating lateral pelvic sway in sync with foot contact
+            # When left foot is stance (contact) & right is swing -> sway slightly left (proj_grav_y ~ -0.04)
+            # When right foot is stance & left is swing -> sway slightly right (proj_grav_y ~ +0.04)
+            waddle_target = 0.045 * (1.0 if (left_contact and not right_contact) else (-1.0 if (right_contact and not left_contact) else 0.0))
+            rew_duck_waddle = 2.0 * float(np.exp(-np.square(proj_grav_y - waddle_target) / 0.003))
+
+            # Allow natural waddle sway (|gy| <= 0.10) without harsh penalty; only penalize tipping over > 0.11
+            cost_roll_lean = 0.0
+            if abs(proj_grav_y) > 0.11:
+                cost_roll_lean = -8.0 * float(abs(proj_grav_y) - 0.11)
+            rew_roll = float(np.exp(-np.square(proj_grav_y - waddle_target) / 0.010))
+
+            # 5b. Duck Head Bobbing: Rhythmic forward/backward neck & head nodding
+            neck_pitch = joint_pos[5]
+            head_pitch = joint_pos[6]
+            head_yaw = joint_pos[7]
+            head_roll = joint_pos[8]
+
+            # In ducks, head bobs forward during swing and stabilizes during stance
+            # Rewarding upright, slightly alert beak pitch (~0.18 rad) with gentle nodding
+            rew_duck_head_bob = 1.5 * float(np.exp(-np.square((neck_pitch + head_pitch) - 0.18) / 0.015))
+            # Keep head looking straight forward (penalize head yaw and roll wobble)
+            cost_head_wobble = -0.8 * float(head_yaw**2 + head_roll**2)
+        else:
+            rew_roll = float(np.exp(-np.square(proj_grav_y) / 0.012))
+            cost_roll_lean = 0.0
+            if abs(proj_grav_y) > 0.08:
+                cost_roll_lean = -8.0 * float(abs(proj_grav_y) - 0.08)
+
         rew_upright = 0.5 * rew_pitch + 0.5 * rew_roll
 
         # Direct penalty for excessive forward/backward leaning
@@ -375,11 +414,6 @@ class MicroduckEnv(gym.Env):
         if proj_grav_x > 0.08:  # Backward tilt > ~4.6 deg
             cost_backward_lean = -8.0 * float(proj_grav_x - 0.08)
 
-        # Direct penalty for lateral rolling / swaying
-        cost_roll_lean = 0.0
-        if abs(proj_grav_y) > 0.08:  # Lateral tilt > ~4.6 deg
-            cost_roll_lean = -8.0 * float(abs(proj_grav_y) - 0.08)
-
         # Overspeed penalty (prevents runaway acceleration sprinting)
         cost_overspeed = 0.0
         if cmd_vx > 0.03 and lin_vel_trunk[0] > cmd_vx + 0.08:
@@ -388,8 +422,8 @@ class MicroduckEnv(gym.Env):
         # 6. Active walking endurance bonus (rewards steady, controlled continuous strides)
         trunk_z = float(self.data.qpos[2])
         rew_endurance = 0.0
-        if (0.04 <= lin_vel_trunk[0] <= cmd_vx + 0.08) and abs(proj_grav_x) < 0.10 and abs(proj_grav_y) < 0.10 and trunk_z > 0.105:
-            rew_endurance = 3.0  # +3.0 for steady controlled forward walking
+        if (0.04 <= lin_vel_trunk[0] <= cmd_vx + 0.08) and abs(proj_grav_x) < 0.10 and abs(proj_grav_y) < 0.11 and trunk_z > 0.105:
+            rew_endurance = 3.5  # Steady controlled forward walking
 
         # 7. Base height reward & low height penalty (nominal z ~ 0.12 m)
         height_err = np.square(trunk_z - 0.12)
@@ -399,7 +433,6 @@ class MicroduckEnv(gym.Env):
             cost_low_height = -15.0 * float(0.112 - trunk_z)
 
         # 8. Joint pose regularization (prevents knee/ankle kinematic drift)
-        joint_pos = self.data.qpos[7:21]
         joint_weights = np.array([
             0.6, 1.0, 0.8, 1.5, 3.0,   # left: yaw, roll, pitch, knee, ankle
             0.2, 0.2, 0.1, 0.1,         # neck & head
@@ -408,9 +441,17 @@ class MicroduckEnv(gym.Env):
         joint_err = np.square(joint_pos - DEFAULT_JOINT_POS)
         cost_joint_drift = -0.10 * float(np.sum(joint_weights * joint_err))
 
-        # 9. Long-term continuous survival bonus (+5.0 per step ONLY in steady walking corridor)
-        if (trunk_z > 0.105 and abs(proj_grav_x) < 0.12 and abs(proj_grav_y) < 0.12 and 0.02 <= lin_vel_trunk[0] <= cmd_vx + 0.10):
-            rew_survival = 5.0
+        # 9. 20-Second Continuous Survival Milestone Ladder
+        # Exponentially reward surviving 10s (500 steps), 15s (750 steps), and 20s+ (1000+ steps)
+        if (trunk_z > 0.105 and abs(proj_grav_x) < 0.12 and abs(proj_grav_y) < 0.13 and 0.02 <= lin_vel_trunk[0] <= cmd_vx + 0.10):
+            if self.current_step >= 1000:    # 20.0+ 秒突破！
+                rew_survival = 25.0
+            elif self.current_step >= 750:   # 15.0 ~ 20.0 秒
+                rew_survival = 15.0
+            elif self.current_step >= 500:   # 10.0 ~ 15.0 秒
+                rew_survival = 8.0
+            else:                            # 0.0 ~ 10.0 秒
+                rew_survival = 5.0
         elif trunk_z > 0.10:
             rew_survival = 1.0
         else:
@@ -430,7 +471,7 @@ class MicroduckEnv(gym.Env):
 
         # Pitch & Roll angular velocity damping to prevent oscillatory pitching and lateral wobble
         cost_pitch_rate = -0.15 * float(np.square(ang_vel_trunk[1]))
-        cost_roll_rate = -0.15 * float(np.square(ang_vel_trunk[0]))
+        cost_roll_rate = -0.10 * float(np.square(ang_vel_trunk[0]))
         cost_body_rates = -0.03 * np.sum(np.square(ang_vel_trunk[:2])) + cost_pitch_rate + cost_roll_rate
 
         # Total composite reward
@@ -440,6 +481,9 @@ class MicroduckEnv(gym.Env):
             + rew_stepping
             + rew_endurance
             + rew_survival
+            + rew_duck_waddle
+            + rew_duck_head_bob
+            + cost_head_wobble
             + cost_stand_still
             + cost_backward_motion
             + cost_overspeed
@@ -464,6 +508,8 @@ class MicroduckEnv(gym.Env):
             "rew_stepping": float(rew_stepping),
             "rew_endurance": float(rew_endurance),
             "rew_survival": float(rew_survival),
+            "rew_duck_waddle": float(rew_duck_waddle),
+            "rew_duck_head_bob": float(rew_duck_head_bob),
             "rew_upright": float(rew_upright),
             "rew_pitch": float(rew_pitch),
             "cost_forward_lean": float(cost_forward_lean),

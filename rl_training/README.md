@@ -1,4 +1,4 @@
-# 🦆 Microduck Reinforcement Learning & Bipedal Locomotion
+# 🦆 Microduck Reinforcement Learning: 20s+ Biomimetic Duck Locomotion
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/microduck/blob/rl-locomotion/Microduck_RL_Colab.ipynb)
 
@@ -6,14 +6,19 @@ This directory contains the reinforcement learning (PPO) training environment, s
 
 ---
 
-## 🌟 Highlights
+## 🌟 Highlights & Duck Mimicry Features
 
-- **MuJoCo 3.0 Physics & Gymnasium**: Vectorized biped simulation with realistic ground contact dynamics and domain randomization.
-- **PPO Locomotion Policy**: 61-D observation vector mapped to 14-D joint target positions at a 50 Hz control rate.
-- **10s+ Champion Checkpoints**: Pre-trained walking policies (`checkpoints/best/best_model.zip`, `checkpoints/microduck_8clones_trained.zip`).
-- **Real-Time Dynamic Visualizer & Web HUD**: Native 3D viewer + Web dashboard on port 8088 with on-the-fly video ON/OFF toggling.
-- **Sim2Real ONNX Exporter**: Complies with Pollen Robotics `robotd` interface (`exported/microduck_10s_champion.onnx`).
-- **Google Colab Cloud Training & GitHub Sync**: Fully automated cloud training workflow with one-click GitHub push-back!
+- **🦆 Biomimetic Duck Motion (模仿真實鴨子動作)**:
+  - **Duck Waddle (左右搖擺步態)**: Rhythmic alternating lateral pelvic sway ($g_y$) synchronized with alternating foot contacts.
+  - **Duck Head Bobbing (前後節奏點頭)**: Rhythmic forward/backward neck & head pitch nodding in cadence with the gait, keeping the beak looking forward.
+  - **Low CoM Webbed-Foot Stance (穩固微蹲步姿)**: Compliant ankle and knee stance preventing forward tipping or falling backward.
+- **⏱️ Continuous Training Loop (直到跨越 20 秒)**:
+  - Automated iterative training and evaluation loop until achieving continuous standing/walking $\ge 20.0$ seconds ($1,000+$ steps).
+  - Exponential 20-second survival milestone reward ladder (+25.0 per step above 1,000 steps).
+  - Planning horizon $\gamma = 0.9991$ ($1,111$ steps = $22.2$ seconds).
+- **🎥 20s HUD Video Player**: In-notebook HTML5 video playback with time, waddle roll, head-bob pitch, height, velocity, and foot contact indicators.
+- **Sim2Real ONNX Exporter**: Complies with Pollen Robotics `robotd` interface (`exported/microduck_20s_champion.onnx`).
+- **One-Click GitHub Push-Back**: Automatically commits and pushes 20s breakthrough checkpoints and video back to `Child-pi/microduck` on branch `rl-locomotion`.
 
 ---
 
@@ -22,13 +27,13 @@ This directory contains the reinforcement learning (PPO) training environment, s
 Open the notebook directly in Google Colab:
 👉 **[Microduck_RL_Colab.ipynb](Microduck_RL_Colab.ipynb)**
 
-### Automated 6-Step Workflow in Colab:
+### Automated Workflow in Colab:
 1. **Auto-Download from GitHub**: Clones `https://github.com/Child-pi/microduck` (`rl-locomotion` branch) directly into Colab.
 2. **Headless Environment Setup**: Configures GPU hardware rendering (EGL) or CPU software rendering (OSMesa).
-3. **8-Clone Parallel Training**: Trains 8 duck clones concurrently with PPO (100k ~ 1M+ steps).
-4. **Evaluation & In-Notebook HUD Video**: Evaluates the newly trained model and plays the walking video with real-time gait telemetry right inside the notebook cell.
-5. **Sim2Real ONNX Export**: Exports the policy for physical robot deployment.
-6. **Push Back to GitHub**: Automatically commits and pushes the new checkpoint (`checkpoints/colab_trained_model.zip`), ONNX model, and telemetry status back to `Child-pi/microduck` on branch `rl-locomotion`!
+3. **Continuous Biomimetic Training**: Iteratively trains 8 duck clones until crossing **20.0 seconds** ($\ge 1,000$ steps).
+4. **20s HUD Video Playback**: Evaluates the breakthrough model and plays the 20-second walking video directly in the notebook cell.
+5. **Sim2Real ONNX Export**: Exports the 20-second policy to `exported/microduck_20s_champion.onnx`.
+6. **Push Back to GitHub**: Automatically commits and pushes `microduck_20s_duck_champion.zip`, ONNX model, and telemetry video back to GitHub!
 
 ---
 
