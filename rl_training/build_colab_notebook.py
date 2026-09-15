@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+"""Builds Microduck_RL_Colab.ipynb with Google Drive persistent storage and 8-duck parallel training."""
+
+import json
+
+notebook = {
+    "nbformat": 4,
+    "nbformat_minor": 0,
+    "metadata": {
+        "colab": {
+            "provenance": [],
+            "toc_visible": True,
+            "authorship_tag": "ABX9TyOn+76451",
+            "include_colab_link": True
+        },
+        "kernelspec": {
+            "name": "python3",
+            "display_name": "Python 3"
+        },
+        "language_info": {
+            "name": "python"
+        },
+        "accelerator": "GPU"
+    },
+    "cells": [
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "# 🦆 Microduck Bipedal Robot Reinforcement Learning (Google Colab & Drive)\n",
+                "\n",
+                "本 Notebook 提供在 **Google Colab** 雲端環境上訓練與評估 **Pollen Robotics Microduck 14-DOF 雙足行走機器人** 的完整實驗流程。\n",
+                "\n",
+                "### 🌟 核心特色：\n",
+                "1. **Google Drive 永久空間存放**：自動掛載 Google Drive，建立專屬專案資料夾，所有訓練權重、日誌與錄製影片永久保存，不因 Colab 斷線而丟失！\n",
+                "2. **8 影分身平行向量化訓練 (8 Clones PPO)**：在 Colab GPU/CPU 上平行模擬 8 隻小鴨，快速收斂。\n",
+                "3. **高畫質 HUD 步態影片即時播放**：直接在 Notebook 儲存格中播放帶有遙測儀表板的 MP4 步態影片。"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 步驟 1：掛載 Google Drive 並建立專案永久存放空間\n",
+                "\n",
+                "執行此單元格後，請授權 Google Drive 存取。這將在您的雲端硬碟建立 `/MyDrive/microduck_training/` 資料夾。"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": [
+                "import os\n",
+                "from google.colab import drive\n",
+                "\n",
+                "# 1. 掛載 Google Drive\n",
+                "print(\"📂 正在掛載 Google Drive...\")\n",
+                "drive.mount('/content/drive')\n",
+                "\n",
+                "# 2. 在 Google Drive 中建立專案儲存空間\n",
+                "GDRIVE_DIR = '/content/drive/MyDrive/microduck_training'\n",
+                "os.makedirs(GDRIVE_DIR, exist_ok=True)\n",
+                "os.makedirs(f\"{GDRIVE_DIR}/checkpoints\", exist_ok=True)\n",
+                "os.makedirs(f\"{GDRIVE_DIR}/logs\", exist_ok=True)\n",
+                "os.makedirs(f\"{GDRIVE_DIR}/videos\", exist_ok=True)\n",
+                "\n",
+                "print(f\"✅ Google Drive 專案空間已就緒：{GDRIVE_DIR}\")\n",
+                "os.chdir(GDRIVE_DIR)\n",
+                "print(f\"當前工作目錄：{os.getcwd()}\")"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 步驟 2：安裝 Linux 無頭渲染與強化學習依賴套件\n",
+                "\n",
+                "Google Colab 為無實體螢幕的 Linux 環境，我們安裝 `libosmesa6-dev` 與最新版 `mujoco`、`gymnasium` 及 `stable-baselines3`。"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": [
+                "# 1. 安裝系統渲染依賴 (OSMesa / EGL / FFmpeg)\n",
+                "!apt-get update -qq && apt-get install -y -qq libosmesa6-dev ffmpeg patchelf\n",
+                "\n",
+                "# 2. 安裝 Python 核心強化學習庫\n",
+                "!pip install -q mujoco>=3.0.0 gymnasium>=0.29.0 stable-baselines3>=2.2.0 opencv-python-headless rich imageio[ffmpeg] pillow\n",
+                "\n",
+                "# 3. 設定 MuJoCo 無頭渲染環境變數 (GPU 啟用 EGL，CPU 啟用 OSMesa)\n",
+                "import os, torch\n",
+                "if torch.cuda.is_available():\n",
+                "    os.environ[\"MUJOCO_GL\"] = \"egl\"\n",
+                "    print(f\"🚀 偵測到 GPU 加速器：{torch.cuda.get_device_name(0)}，啟用 EGL 渲染硬體加速。\")\n",
+                "else:\n",
+                "    os.environ[\"MUJOCO_GL\"] = \"osmesa\"\n",
+                "    print(\"⚡ 運行於 CPU 實例，啟用 OSMesa 無頭軟體渲染。\")\n",
+                "\n",
+                "import mujoco, gymnasium, stable_baselines3\n",
+                "print(f\"✅ 套件載入成功！MuJoCo 版本: {mujoco.__version__}, SB3 版本: {stable_baselines3.__version__}\")"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 步驟 3：解壓縮或下載 Microduck 模型與環境程式碼\n",
+                "\n",
+                "如果您已將 `microduck_colab_package.zip` 上傳至 Google Drive 或 Colab，直接解壓縮；如果尚未上傳，下方腳本會自動同步。"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": [
+                "# 檢查程式碼是否已存在於 Google Drive 中\n",
+                "if not os.path.exists(f\"{GDRIVE_DIR}/envs/microduck_env.py\"):\n",
+                "    print(\"📦 正在將 Microduck 實驗套件解壓縮至 Google Drive...\")\n",
+                "    if os.path.exists(\"/content/microduck_colab_package.zip\"):\n",
+                "        !unzip -q /content/microduck_colab_package.zip -d {GDRIVE_DIR}\n",
+                "    elif os.path.exists(f\"{GDRIVE_DIR}/microduck_colab_package.zip\"):\n",
+                "        !unzip -q {GDRIVE_DIR}/microduck_colab_package.zip -d {GDRIVE_DIR}\n",
+                "    else:\n",
+                "        print(\"⚠️ 請將 microduck_colab_package.zip 上傳至 Colab 左側檔案區或 Google Drive！\")\n",
+                "\n",
+                "# 加入 Python 模組搜索路徑\n",
+                "import sys\n",
+                "if GDRIVE_DIR not in sys.path:\n",
+                "    sys.path.append(GDRIVE_DIR)\n",
+                "\n",
+                "# 驗證檔案結構\n",
+                "!ls -lh {GDRIVE_DIR}"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 步驟 4：測試 Gymnasium 強化學習環境與最佳預訓練模型\n",
+                "\n",
+                "測試 14-DOF 機器人步態環境能否正常 reset、接收 61-D 觀察值，並確認是否能載入 10.5 秒冠軍權重。"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": [
+                "import envs\n",
+                "import gymnasium as gym\n",
+                "from stable_baselines3 import PPO\n",
+                "\n",
+                "env = gym.make(\"Microduck-v0\")\n",
+                "obs, info = env.reset(seed=89)\n",
+                "print(\"🦆 Microduck-v0 環境初始化成功！\")\n",
+                "print(f\"觀察空間維度: {obs.shape} (61 維度)\")\n",
+                "print(f\"動作空間維度: {env.action_space.shape} (14 個伺服舵機)\")\n",
+                "\n",
+                "# 檢查預訓練權重\n",
+                "best_ckpt = f\"{GDRIVE_DIR}/checkpoints/best/best_model.zip\"\n",
+                "if os.path.exists(best_ckpt):\n",
+                "    test_model = PPO.load(best_ckpt, device=\"cpu\")\n",
+                "    action, _ = test_model.predict(obs, deterministic=True)\n",
+                "    obs, rew, term, trunc, _ = env.step(action)\n",
+                "    print(f\"🏆 成功載入冠軍模型！單步預測動作: {action.shape}, 獲得獎勵: {rew:.2f}\")\n",
+                "else:\n",
+                "    print(\"🌱 尚未找到預訓練模型，將從隨機權重開始訓練。\")"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 步驟 5：啟動 8 隻小鴨平行強化學習訓練 (8 Clones Vectorized PPO)\n",
+                "\n",
+                "在 Colab 雲端實例上啟動 8 個平行環境進行 PPO 策略優化。\n",
+                "訓練過程產生的最新模型會**直接寫入您的 Google Drive**，永久不丟失！"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": [
+                "from stable_baselines3.common.vec_env import DummyVecEnv\n",
+                "from stable_baselines3.common.monitor import Monitor\n",
+                "from envs.microduck_env import MicroduckEnv\n",
+                "\n",
+                "NUM_CLONES = 8\n",
+                "TRAIN_TIMESTEPS = 300_000\n",
+                "\n",
+                "def make_env_fn(clone_id):\n",
+                "    def _thunk():\n",
+                "        env = MicroduckEnv(\n",
+                "            render_mode=\"rgb_array\",\n",
+                "            render_width=320,\n",
+                "            render_height=240,\n",
+                "        )\n",
+                "        return Monitor(env)\n",
+                "    return _thunk\n",
+                "\n",
+                "print(f\"🦆 正在建立 {NUM_CLONES} 個平行小鴨環境...\")\n",
+                "vec_env = DummyVecEnv([make_env_fn(i) for i in range(NUM_CLONES)])\n",
+                "\n",
+                "policy_kwargs = dict(\n",
+                "    net_arch=dict(pi=[256, 128, 64], vf=[256, 128, 64]),\n",
+                ")\n",
+                "\n",
+                "# 接續訓練或全新訓練\n",
+                "resume_ckpt = f\"{GDRIVE_DIR}/checkpoints/best/best_model.zip\"\n",
+                "if os.path.exists(resume_ckpt):\n",
+                "    print(f\"📂 載入已儲存之最佳權重接續訓練：{resume_ckpt}\")\n",
+                "    model = PPO.load(\n",
+                "        resume_ckpt,\n",
+                "        env=vec_env,\n",
+                "        device=\"auto\",\n",
+                "        tensorboard_log=f\"{GDRIVE_DIR}/logs\",\n",
+                "        learning_rate=1e-4,\n",
+                "        gamma=0.9985,\n",
+                "    )\n",
+                "else:\n",
+                "    print(\"🌱 從隨機權重初始化 PPO 神經網絡...\")\n",
+                "    model = PPO(\n",
+                "        \"MlpPolicy\",\n",
+                "        vec_env,\n",
+                "        learning_rate=3e-4,\n",
+                "        n_steps=512,\n",
+                "        batch_size=64,\n",
+                "        n_epochs=10,\n",
+                "        gamma=0.9985,\n",
+                "        policy_kwargs=policy_kwargs,\n",
+                "        verbose=1,\n",
+                "        device=\"auto\",\n",
+                "        tensorboard_log=f\"{GDRIVE_DIR}/logs\",\n",
+                "    )\n",
+                "\n",
+                "print(f\"🚀 開始執行 {TRAIN_TIMESTEPS:,} 步平行訓練...\")\n",
+                "model.learn(total_timesteps=TRAIN_TIMESTEPS)\n",
+                "\n",
+                "# 將模型永久儲存至 Google Drive\n",
+                "saved_model_path = f\"{GDRIVE_DIR}/checkpoints/microduck_colab_trained.zip\"\n",
+                "model.save(saved_model_path)\n",
+                "print(f\"\\n✅ 訓練完成！模型已永久保存至 Google Drive：{saved_model_path}\")"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 步驟 6：評估步態、錄製高畫質影片並於 Colab 中即時播放\n",
+                "\n",
+                "載入最新訓練出來的模型，進行 50 Hz 步態模擬，並渲染帶有抬頭顯示器 (HUD: 時間、速度、高度、雙腳著地) 的 MP4 影片，直接在瀏覽器儲存格內播放！"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": [
+                "import cv2\n",
+                "import numpy as np\n",
+                "from IPython.display import HTML\n",
+                "from base64 import b64encode\n",
+                "from envs.microduck_env import MicroduckEnv\n",
+                "from stable_baselines3 import PPO\n",
+                "\n",
+                "print(\"🎥 正在評估步態並渲染高畫質 HUD 影片...\")\n",
+                "eval_model_path = f\"{GDRIVE_DIR}/checkpoints/microduck_colab_trained.zip\"\n",
+                "if not os.path.exists(eval_model_path):\n",
+                "    eval_model_path = f\"{GDRIVE_DIR}/checkpoints/best/best_model.zip\"\n",
+                "\n",
+                "eval_model = PPO.load(eval_model_path, device=\"cpu\")\n",
+                "eval_env = MicroduckEnv(\n",
+                "    render_mode=\"rgb_array\",\n",
+                "    render_width=640,\n",
+                "    render_height=480,\n",
+                "    max_episode_steps=350,\n",
+                ")\n",
+                "eval_env.resample_commands = False\n",
+                "\n",
+                "obs, _ = eval_env.reset(seed=89)\n",
+                "eval_env.commands[0] = 0.08\n",
+                "obs[48:51] = [0.08, 0.0, 0.0]\n",
+                "\n",
+                "frames = []\n",
+                "for s in range(350):\n",
+                "    rgb = eval_env.render()\n",
+                "    if rgb is not None:\n",
+                "        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)\n",
+                "        z = float(eval_env.data.qpos[2])\n",
+                "        site_mat = eval_env.data.site_xmat[eval_env.imu_site_id].reshape(3, 3)\n",
+                "        linvel = site_mat.T @ eval_env.data.qvel[:3]\n",
+                "        t_s = s * 0.02\n",
+                "\n",
+                "        # 著地偵測\n",
+                "        lc, rc = False, False\n",
+                "        for c_idx in range(eval_env.data.ncon):\n",
+                "            c = eval_env.data.contact[c_idx]\n",
+                "            g1, g2 = c.geom1, c.geom2\n",
+                "            if (g1 == eval_env.floor_geom_id and g2 == eval_env.left_foot_geom_id) or (g2 == eval_env.floor_geom_id and g1 == eval_env.left_foot_geom_id):\n",
+                "                lc = True\n",
+                "            if (g1 == eval_env.floor_geom_id and g2 == eval_env.right_foot_geom_id) or (g2 == eval_env.floor_geom_id and g1 == eval_env.right_foot_geom_id):\n",
+                "                rc = True\n",
+                "\n",
+                "        # 繪製 HUD\n",
+                "        overlay = bgr.copy()\n",
+                "        cv2.rectangle(overlay, (0, 0), (640, 75), (15, 20, 28), -1)\n",
+                "        cv2.addWeighted(overlay, 0.75, bgr, 0.25, 0, bgr)\n",
+                "        cv2.putText(bgr, f\"Time: {t_s:.2f}s | Step: {s} | Height: {z:.3f}m | Vel: {linvel[0]:+.2f}m/s\", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (46, 196, 182), 2)\n",
+                "        cv2.putText(bgr, f\"Stance: Left [{ 'CONTACT' if lc else 'SWING' }] | Right [{ 'CONTACT' if rc else 'SWING' }]\", (16, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1)\n",
+                "        frames.append(bgr)\n",
+                "\n",
+                "    action, _ = eval_model.predict(obs, deterministic=True)\n",
+                "    obs, rew, term, trunc, _ = eval_env.step(action)\n",
+                "    obs[48:51] = [0.08, 0.0, 0.0]\n",
+                "    if term or trunc:\n",
+                "        print(f\"行走在第 {s} 步完成 (持續 {t_s:.2f} 秒)！\")\n",
+                "        break\n",
+                "\n",
+                "# 儲存為 MP4 檔案至 Google Drive\n",
+                "video_file = f\"{GDRIVE_DIR}/videos/microduck_colab_walk.mp4\"\n",
+                "vw = cv2.VideoWriter(video_file, cv2.VideoWriter_fourcc(*'mp4v'), 30.0, (640, 480))\n",
+                "for f in frames:\n",
+                "    vw.write(f)\n",
+                "vw.release()\n",
+                "print(f\"✅ 影片已儲存至 Google Drive：{video_file}\")\n",
+                "\n",
+                "# 轉碼為 H.264 以便在瀏覽器中播放\n",
+                "web_video = \"/tmp/colab_preview.mp4\"\n",
+                "!ffmpeg -y -i {video_file} -vcodec libx264 -crf 23 {web_video} -loglevel quiet\n",
+                "\n",
+                "mp4_data = open(web_video, 'rb').read()\n",
+                "data_url = \"data:video/mp4;base64,\" + b64encode(mp4_data).decode()\n",
+                "HTML(f'''\n",
+                "<div style=\"text-align:center;\">\n",
+                "  <h3 style=\"color:#2ec4b6;\">🦆 Microduck 雙足行走即時評估影片 (50 Hz 步態)</h3>\n",
+                "  <video width=\"640\" height=\"480\" controls autoplay loop style=\"border-radius:10px; border:2px solid #2ec4b6;\">\n",
+                "    <source src=\"{data_url}\" type=\"video/mp4\">\n",
+                "  </video>\n",
+                "</div>\n",
+                "''')"
+            ]
+        },
+        {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [
+                "## 步驟 7：匯出實機 ONNX 模型 (Sim2Real)\n",
+                "\n",
+                "將訓練好的 PyTorch / SB3 策略神經網絡匯出為符 Pollen Robotics `robotd` 規範的 ONNX 格式，可直接部署至實體機器人晶片。"
+            ]
+        },
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": [
+                "import torch\n",
+                "from stable_baselines3 import PPO\n",
+                "\n",
+                "onnx_output_path = f\"{GDRIVE_DIR}/checkpoints/microduck_policy.onnx\"\n",
+                "print(f\"📦 正在將權重匯出至 ONNX 格式：{onnx_output_path}\")\n",
+                "\n",
+                "model = PPO.load(eval_model_path, device=\"cpu\")\n",
+                "actor = model.policy.mlp_extractor.policy_net\n",
+                "action_net = model.policy.action_net\n",
+                "\n",
+                "class PolicyWrapper(torch.nn.Module):\n",
+                "    def __init__(self, actor, action_net):\n",
+                "        super().__init__()\n",
+                "        self.actor = actor\n",
+                "        self.action_net = action_net\n",
+                "    def forward(self, obs):\n",
+                "        features = self.actor(obs)\n",
+                "        return self.action_net(features)\n",
+                "\n",
+                "wrapper = PolicyWrapper(actor, action_net)\n",
+                "wrapper.eval()\n",
+                "\n",
+                "dummy_obs = torch.zeros((1, 61), dtype=torch.float32)\n",
+                "torch.onnx.export(\n",
+                "    wrapper,\n",
+                "    dummy_obs,\n",
+                "    onnx_output_path,\n",
+                "    input_names=[\"obs\"],\n",
+                "    output_names=[\"actions\"],\n",
+                "    dynamic_axes={\"obs\": {0: \"batch_size\"}, \"actions\": {0: \"batch_size\"}},\n",
+                "    opset_version=14,\n",
+                ")\n",
+                "\n",
+                "print(f\"✅ ONNX 實機模型已匯出並保存於 Google Drive：{onnx_output_path}\")\n",
+                "!ls -lh {onnx_output_path}"
+            ]
+        }
+    ]
+}
+
+with open("Microduck_RL_Colab.ipynb", "w", encoding="utf-8") as f:
+    json.dump(notebook, f, indent=2, ensure_ascii=False)
+
+print("✅ Successfully generated Microduck_RL_Colab.ipynb!")

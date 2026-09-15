@@ -1,0 +1,94 @@
+{
+  "timestamp": "2026-09-15T08:59:43",
+  "step": 1015800,
+  "total_timesteps": 1000000,
+  "progress_pct": 100.0,
+  "fps": 5288.8,
+  "mean_reward": 339.57,
+  "elapsed_seconds": 300.9,
+  "video_enabled": false,
+  "policy_loss": -0.04661,
+  "value_loss": 3876.36,
+  "clones": [
+    {
+      "id": 1,
+      "height": 0.12,
+      "vx": -0.014,
+      "alive": true,
+      "left_contact": false,
+      "right_contact": true,
+      "episode": 1252,
+      "reward": 69.5
+    },
+    {
+      "id": 2,
+      "height": 0.107,
+      "vx": -0.013,
+      "alive": true,
+      "left_contact": false,
+      "right_contact": true,
+      "episode": 1236,
+      "reward": 107.9
+    },
+    {
+      "id": 3,
+      "height": 0.118,
+      "vx": 0.16,
+      "alive": true,
+      "left_contact": false,
+      "right_contact": true,
+      "episode": 1242,
+      "reward": 8.8
+    },
+    {
+      "id": 4,
+      "height": 0.115,
+      "vx": -0.223,
+      "alive": true,
+      "left_contact": true,
+      "right_contact": false,
+      "episode": 1281,
+      "reward": 63.9
+    },
+    {
+      "id": 5,
+      "height": 0.11,
+      "vx": -0.337,
+      "alive": true,
+      "left_contact": true,
+      "right_contact": true,
+      "episode": 1261,
+      "reward": 55.4
+    },
+    {
+      "id": 6,
+      "height": 0.121,
+      "vx": 0.174,
+      "alive": true,
+      "left_contact": false,
+      "right_contact": true,
+      "episode": 1287,
+      "reward": 303.1
+    },
+    {
+      "id": 7,
+      "height": 0.119,
+      "vx": 0.215,
+      "alive": true,
+      "left_contact": false,
+      "right_contact": true,
+      "episode": 1252,
+      "reward": 13.3
+    },
+    {
+      "id": 8,
+      "height": 0.117,
+      "vx": -0.184,
+      "alive": true,
+      "left_contact": false,
+      "right_contact": false,
+      "episode": 1275,
+      "reward": 123.8
+    }
+  ]
+}
