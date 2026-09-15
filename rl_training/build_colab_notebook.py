@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds Microduck_RL_Colab.ipynb with continuous training until 20s+ survival and biomimetic duck motion."""
+"""Builds Microduck_RL_Colab.ipynb with continuous training until 20s+ survival and biomimetic duck motion, fully compatible with all Gymnasium wrappers."""
 
 import json
 
@@ -141,12 +141,20 @@ notebook = {
                 "from envs.microduck_env import MicroduckEnv\n",
                 "from stable_baselines3 import PPO\n",
                 "\n",
-                "# 建立並重設環境，啟用 duck_mimic_mode\n",
-                "env = gym.make(\"Microduck-v0\", duck_mimic_mode=True, max_episode_steps=1500)\n",
+                "# 1. 建立標準環境 (不傳遞額外 kwargs 至 gym.make，徹底避免任何 Wrapper 或版本衝突)\n",
+                "env = gym.make(\"Microduck-v0\")\n",
+                "\n",
+                "# 2. 透過 env.unwrapped 安全啟用仿生鴨子步態與設定最大步數\n",
+                "if hasattr(env.unwrapped, \"duck_mimic_mode\"):\n",
+                "    env.unwrapped.duck_mimic_mode = True\n",
+                "env.unwrapped.max_episode_steps = 1500\n",
+                "\n",
                 "obs, info = env.reset(seed=89)\n",
                 "\n",
+                "# 3. 正確從 env.unwrapped 或 env.spec 讀取 max_episode_steps (修復 TimeLimit wrapper 屬性訪問)\n",
+                "max_steps = getattr(env.unwrapped, \"max_episode_steps\", getattr(env.spec, \"max_episode_steps\", 1500))\n",
                 "print(\"🦆 Microduck 仿生小鴨環境初始化成功！\")\n",
-                "print(f\" • 最大回合步數: {env.max_episode_steps} 步 (相當於 {env.max_episode_steps * 0.02:.1f} 秒，具備跨越 20 秒空間！)\")\n",
+                "print(f\" • 最大回合步數: {max_steps} 步 (相當於 {max_steps * 0.02:.1f} 秒，具備跨越 20 秒空間！)\")\n",
                 "print(f\" • 觀察空間維度: {obs.shape} (61 維)\")\n",
                 "print(f\" • 動作空間維度: {env.action_space.shape} (14 個伺服舵機角度)\")\n",
                 "\n",
@@ -204,6 +212,8 @@ notebook = {
                 "            max_episode_steps=1500,\n",
                 "            duck_mimic_mode=True,\n",
                 "        )\n",
+                "        if hasattr(e, \"duck_mimic_mode\"):\n",
+                "            e.duck_mimic_mode = True\n",
                 "        return Monitor(e)\n",
                 "    return _thunk\n",
                 "\n",
@@ -243,6 +253,8 @@ notebook = {
                 "# 步態耐力快速檢驗函數\n",
                 "def evaluate_duration(policy_model, seed=89, max_steps=1250):\n",
                 "    eval_env = MicroduckEnv(max_episode_steps=max_steps, duck_mimic_mode=True)\n",
+                "    if hasattr(eval_env, \"duck_mimic_mode\"):\n",
+                "        eval_env.duck_mimic_mode = True\n",
                 "    eval_env.resample_commands = False\n",
                 "    obs, _ = eval_env.reset(seed=seed)\n",
                 "    eval_env.commands[0] = 0.08\n",
@@ -373,6 +385,8 @@ notebook = {
                 "    max_episode_steps=RECORD_MAX_STEPS,\n",
                 "    duck_mimic_mode=True,\n",
                 ")\n",
+                "if hasattr(eval_env, \"duck_mimic_mode\"):\n",
+                "    eval_env.duck_mimic_mode = True\n",
                 "eval_env.resample_commands = False\n",
                 "\n",
                 "obs, _ = eval_env.reset(seed=89)\n",
@@ -593,7 +607,6 @@ notebook = {
     ]
 }
 
-# 輸出到所有關鍵路徑
 paths = [
     "/Users/childpi/working/microduck/Microduck_RL_Colab.ipynb",
     "/Users/childpi/working/microduck/rl_training/Microduck_RL_Colab.ipynb",

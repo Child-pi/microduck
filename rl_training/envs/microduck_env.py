@@ -96,6 +96,7 @@ class MicroduckEnv(gym.Env):
         render_height: int = 480,
         command_ranges: Optional[Dict[str, Tuple[float, float]]] = None,
         duck_mimic_mode: bool = True,   # Biomimetic duck waddle and head-bobbing motion
+        **kwargs,                       # Gracefully absorb extra kwargs passed by gym.make wrappers
     ):
         super().__init__()
 
