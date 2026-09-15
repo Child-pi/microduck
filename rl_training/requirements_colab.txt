@@ -7,3 +7,5 @@ rich
 imageio[ffmpeg]
 pillow
 numpy
+torch>=2.0.0
+onnx>=1.14.0
