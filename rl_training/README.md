@@ -1,6 +1,7 @@
 # 🦆 Microduck Reinforcement Learning: 20s+ Biomimetic Duck Locomotion
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/microduck/blob/rl-locomotion/Microduck_RL_Colab.ipynb)
+[![Open In Colab (Quick Training)](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/microduck/blob/rl-locomotion/Microduck_Colab_Training.ipynb)
+[![Open In Colab (Git Workflow)](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/microduck/blob/rl-locomotion/Microduck_RL_Colab.ipynb)
 
 This directory contains the reinforcement learning (PPO) training environment, simulation assets, pre-trained policy checkpoints, evaluation tools, and Google Colab integration for the **Pollen Robotics Microduck** 14-DOF bipedal robot.
 
@@ -24,8 +25,9 @@ This directory contains the reinforcement learning (PPO) training environment, s
 
 ## ☁️ Google Colab Cloud Training & Automatic GitHub Sync
 
-Open the notebook directly in Google Colab:
-👉 **[Microduck_RL_Colab.ipynb](Microduck_RL_Colab.ipynb)**
+Open either notebook directly in Google Colab:
+- 🚀 **[Microduck_Colab_Training.ipynb](Microduck_Colab_Training.ipynb)** (1-Click Standalone Training & Telemetry Video, Auto-downloads package)
+- 🔄 **[Microduck_RL_Colab.ipynb](Microduck_RL_Colab.ipynb)** (Full Repo Clone, Continuous 20s+ Training & Git Push-Back)
 
 ### Automated Workflow in Colab:
 1. **Auto-Download from GitHub**: Clones `https://github.com/Child-pi/microduck` (`rl-locomotion` branch) directly into Colab.

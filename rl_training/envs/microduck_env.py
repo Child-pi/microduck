@@ -7,7 +7,30 @@ Optimized for local training on Apple Silicon / macOS using native MuJoCo 3.
 from __future__ import annotations
 
 import os
+import sys
+import subprocess
 from typing import Any, Dict, Optional, Tuple
+
+# Auto-configure headless MuJoCo rendering backend on Linux (Google Colab / Cloud)
+if "MUJOCO_GL" not in os.environ and sys.platform.startswith("linux"):
+    has_gpu = False
+    try:
+        has_gpu = subprocess.run(["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except Exception:
+        pass
+    if has_gpu:
+        icd_path = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+        if not os.path.exists(icd_path):
+            try:
+                os.makedirs(os.path.dirname(icd_path), exist_ok=True)
+                with open(icd_path, "w") as f:
+                    f.write('{\n    "file_format_version" : "1.0.0",\n    "ICD" : {\n        "library_path" : "libEGL_nvidia.so.0"\n    }\n}\n')
+            except Exception:
+                pass
+        os.environ["MUJOCO_GL"] = "egl"
+        os.environ["PYOPENGL_PLATFORM"] = "egl"
+    else:
+        os.environ["MUJOCO_GL"] = "osmesa"
 
 import gymnasium as gym
 from gymnasium import spaces

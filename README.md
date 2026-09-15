@@ -17,6 +17,12 @@
 </p>
 
 <p align="center">
+  <a href="https://colab.research.google.com/github/Child-pi/microduck/blob/rl-locomotion/Microduck_Colab_Training.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"></a> ·
+  <a href="rl_training/"><b>🦆 RL Locomotion Training (20s+ Walk)</b></a> ·
+  <a href="explain_how_to_training_microduck/index.html"><b>📖 Theory & MDP Docs</b></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/pollen-robotics/microduck/actions/workflows/ci.yml"><img src="https://github.com/pollen-robotics/microduck/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
 

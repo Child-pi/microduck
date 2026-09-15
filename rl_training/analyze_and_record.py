@@ -14,6 +14,30 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
+import subprocess
+
+# Auto-configure headless MuJoCo rendering on Linux / Google Colab
+if "MUJOCO_GL" not in os.environ and sys.platform.startswith("linux"):
+    has_gpu = False
+    try:
+        has_gpu = subprocess.run(["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except Exception:
+        pass
+    if has_gpu:
+        icd_path = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+        if not os.path.exists(icd_path):
+            try:
+                os.makedirs(os.path.dirname(icd_path), exist_ok=True)
+                with open(icd_path, "w") as f:
+                    f.write('{\n    "file_format_version" : "1.0.0",\n    "ICD" : {\n        "library_path" : "libEGL_nvidia.so.0"\n    }\n}\n')
+            except Exception:
+                pass
+        os.environ["MUJOCO_GL"] = "egl"
+        os.environ["PYOPENGL_PLATFORM"] = "egl"
+    else:
+        os.environ["MUJOCO_GL"] = "osmesa"
+
 import cv2
 import numpy as np
 from PIL import Image
@@ -106,13 +130,41 @@ def evaluate_and_record(
     duration_s = total_steps * 0.02
     print(f"\nSimulation completed: {total_steps} steps ({duration_s:.2f} seconds)")
 
-    # Save MP4
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    vw = cv2.VideoWriter(output_video, fourcc, 50.0, (640, 480))
-    for f in frames:
-        vw.write(cv2.cvtColor(f, cv2.COLOR_RGB2BGR))
-    vw.release()
-    print(f"Saved video to: {output_video}")
+    # Save MP4 (try H.264 via imageio first for HTML5 browser playback, fallback to OpenCV)
+    saved_h264 = False
+    try:
+        import imageio
+        writer = imageio.get_writer(output_video, fps=50, codec="libx264", pixelformat="yuv420p")
+        for f in frames:
+            writer.append_data(f)
+        writer.close()
+        saved_h264 = True
+        print(f"Saved web-compatible H.264 MP4 via imageio: {output_video}")
+    except Exception:
+        pass
+
+    if not saved_h264:
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        vw = cv2.VideoWriter(output_video, fourcc, 50.0, (640, 480))
+        for f in frames:
+            vw.write(cv2.cvtColor(f, cv2.COLOR_RGB2BGR))
+        vw.release()
+        # If ffmpeg command line is available, convert to H.264
+        try:
+            temp_raw = output_video + ".temp.mp4"
+            os.replace(output_video, temp_raw)
+            ret = subprocess.run(
+                ["ffmpeg", "-y", "-i", temp_raw, "-vcodec", "libx264", "-pix_fmt", "yuv420p", output_video],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if ret.returncode == 0 and os.path.exists(output_video):
+                os.remove(temp_raw)
+            else:
+                os.replace(temp_raw, output_video)
+        except Exception:
+            pass
+        print(f"Saved video to: {output_video}")
 
     # Save GIF (downsample to 25 fps, frame stride 2)
     pil_frames = [Image.fromarray(f) for f in frames[::2]]
