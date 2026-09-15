@@ -1,0 +1,1197 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Microduck 雙足機器人強化學習訓練全解：從數學原理、仿生步態到跨領域機械手臂遷移</title>
+    <!-- MathJax for rendering LaTeX formulas -->
+    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0b0f19;
+            --bg-secondary: #111827;
+            --bg-card: #1f2937;
+            --bg-card-hover: #263344;
+            --accent-primary: #06b6d4;
+            --accent-secondary: #10b981;
+            --accent-warning: #f59e0b;
+            --accent-danger: #ef4444;
+            --accent-purple: #8b5cf6;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --text-subtle: #6b7280;
+            --border-color: #374151;
+            --code-bg: #030712;
+            --sidebar-width: 300px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', 'Noto Sans TC', -apple-system, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-main);
+            line-height: 1.7;
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* Sidebar Navigation */
+        aside.sidebar {
+            width: var(--sidebar-width);
+            background-color: var(--bg-secondary);
+            border-right: 1px solid var(--border-color);
+            position: fixed;
+            top: 0;
+            bottom: 0;
+            left: 0;
+            overflow-y: auto;
+            padding: 2rem 1.25rem;
+            z-index: 100;
+        }
+
+        .sidebar-brand {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .sidebar-brand .logo {
+            font-size: 2rem;
+        }
+
+        .sidebar-brand h2 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #fff;
+            letter-spacing: -0.02em;
+        }
+
+        .sidebar-brand span {
+            font-size: 0.75rem;
+            color: var(--accent-primary);
+            display: block;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .nav-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .nav-group-title {
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-subtle);
+            margin-bottom: 0.6rem;
+            padding-left: 0.5rem;
+        }
+
+        .nav-group a {
+            display: block;
+            padding: 0.55rem 0.75rem;
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.88rem;
+            border-radius: 6px;
+            transition: all 0.2s ease;
+            margin-bottom: 0.25rem;
+        }
+
+        .nav-group a:hover, .nav-group a.active {
+            color: #fff;
+            background-color: var(--bg-card);
+            border-left: 3px solid var(--accent-primary);
+        }
+
+        /* Main Content Container */
+        main.content {
+            margin-left: var(--sidebar-width);
+            flex: 1;
+            padding: 3rem 4rem;
+            max-width: 1280px;
+        }
+
+        header.doc-header {
+            margin-bottom: 3.5rem;
+            padding-bottom: 2rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .doc-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background: rgba(6, 182, 212, 0.12);
+            color: var(--accent-primary);
+            border: 1px solid rgba(6, 182, 212, 0.3);
+            padding: 0.3rem 0.8rem;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        h1.doc-title {
+            font-size: 2.5rem;
+            font-weight: 800;
+            line-height: 1.25;
+            margin-bottom: 1rem;
+            background: linear-gradient(135deg, #ffffff 0%, #cbd5e1 50%, #94a3b8 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        p.doc-subtitle {
+            font-size: 1.15rem;
+            color: var(--text-muted);
+            max-width: 900px;
+        }
+
+        /* Content Sections */
+        section {
+            margin-bottom: 4rem;
+            scroll-margin-top: 2rem;
+        }
+
+        h2.section-heading {
+            font-size: 1.85rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding-bottom: 0.75rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        h2.section-heading .sec-num {
+            color: var(--accent-primary);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.4rem;
+        }
+
+        h3.subsection-heading {
+            font-size: 1.35rem;
+            font-weight: 600;
+            margin: 2rem 0 1rem 0;
+            color: #e2e8f0;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        p {
+            margin-bottom: 1.2rem;
+            color: #d1d5db;
+        }
+
+        /* Cards and Callouts */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 1.5rem;
+            margin: 1.75rem 0;
+        }
+
+        .card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.5rem;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            border-color: var(--accent-primary);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+
+        .card-icon {
+            font-size: 1.5rem;
+        }
+
+        .card-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .callout {
+            background-color: rgba(6, 182, 212, 0.08);
+            border-left: 4px solid var(--accent-primary);
+            padding: 1.25rem 1.5rem;
+            border-radius: 0 8px 8px 0;
+            margin: 1.75rem 0;
+        }
+
+        .callout.warning {
+            background-color: rgba(245, 158, 11, 0.08);
+            border-left-color: var(--accent-warning);
+        }
+
+        .callout.success {
+            background-color: rgba(16, 185, 129, 0.08);
+            border-left-color: var(--accent-secondary);
+        }
+
+        .callout-title {
+            font-weight: 700;
+            color: #fff;
+            margin-bottom: 0.4rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* Tables */
+        .table-responsive {
+            overflow-x: auto;
+            margin: 1.75rem 0;
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.92rem;
+            background-color: var(--bg-card);
+        }
+
+        th {
+            background-color: #111827;
+            color: #f8fafc;
+            font-weight: 600;
+            padding: 0.9rem 1.1rem;
+            border-bottom: 2px solid var(--border-color);
+            letter-spacing: 0.02em;
+        }
+
+        td {
+            padding: 0.85rem 1.1rem;
+            border-bottom: 1px solid var(--border-color);
+            color: #cbd5e1;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover td {
+            background-color: var(--bg-card-hover);
+        }
+
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            background-color: var(--code-bg);
+            padding: 0.2rem 0.45rem;
+            border-radius: 4px;
+            font-size: 0.86em;
+            color: #38bdf8;
+            border: 1px solid rgba(56, 189, 248, 0.15);
+        }
+
+        pre {
+            background-color: var(--code-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 1.25rem 1.5rem;
+            overflow-x: auto;
+            margin: 1.5rem 0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.88rem;
+            line-height: 1.6;
+            color: #e2e8f0;
+        }
+
+        /* SVG Diagrams & Visuals */
+        .diagram-box {
+            background-color: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 2rem;
+            margin: 2rem 0;
+            text-align: center;
+        }
+
+        .diagram-caption {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 1rem;
+            font-style: italic;
+        }
+
+        .img-showcase {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+            gap: 1.5rem;
+            margin: 2rem 0;
+        }
+
+        .img-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .img-card img {
+            width: 100%;
+            height: 240px;
+            object-fit: cover;
+            border-bottom: 1px solid var(--border-color);
+            display: block;
+        }
+
+        .img-card-body {
+            padding: 1rem 1.25rem;
+        }
+
+        .img-card-title {
+            font-weight: 600;
+            color: #fff;
+            margin-bottom: 0.35rem;
+            font-size: 0.95rem;
+        }
+
+        .img-card-desc {
+            font-size: 0.82rem;
+            color: var(--text-muted);
+        }
+
+        /* Formula highlights */
+        .math-block {
+            background: #030712;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            margin: 1.25rem 0;
+            overflow-x: auto;
+        }
+
+        /* Step Badge */
+        .step-badge {
+            display: inline-block;
+            background: var(--accent-primary);
+            color: #042f2e;
+            font-weight: 800;
+            width: 26px;
+            height: 26px;
+            line-height: 26px;
+            text-align: center;
+            border-radius: 50%;
+            margin-right: 0.5rem;
+            font-size: 0.85rem;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 1024px) {
+            body {
+                flex-direction: column;
+            }
+            aside.sidebar {
+                position: relative;
+                width: 100%;
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+            }
+            main.content {
+                margin-left: 0;
+                padding: 2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Left Navigation Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-brand">
+            <span class="logo">🦆</span>
+            <div>
+                <h2>Microduck RL</h2>
+                <span>Reinforcement Learning Doc</span>
+            </div>
+        </div>
+
+        <div class="nav-group">
+            <div class="nav-group-title">入門導覽</div>
+            <a href="#overview">1. 專案導讀與核心架構</a>
+            <a href="#intuition">2. 淺顯易懂：運作流程與 Loop</a>
+        </div>
+
+        <div class="nav-group">
+            <div class="nav-group-title">數學理論與實作</div>
+            <a href="#math-foundations">3. 數學概念與程式對應</a>
+            <a href="#ppo-theory">4. PPO 演算法與長期規劃</a>
+            <a href="#reward-shaping">5. 仿生步態獎勵塑形</a>
+        </div>
+
+        <div class="nav-group">
+            <div class="nav-group-title">參數規格與工程</div>
+            <a href="#io-parameters">6. Input / Output 參數物理意義</a>
+            <a href="#hyperparameters">7. 關鍵超參數實體解析</a>
+            <a href="#progression">8. 從 4秒 到 20秒 的進化軌跡</a>
+        </div>
+
+        <div class="nav-group">
+            <div class="nav-group-title">跨領域遷移</div>
+            <a href="#arm-transfer">9. 遷移指南：機械手臂控制</a>
+            <a href="#summary">10. 結語與最佳實踐清單</a>
+        </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="content">
+
+        <!-- Header -->
+        <header class="doc-header">
+            <div class="doc-badge">POLLEN ROBOTICS • MICRODUCK 14-DOF • MUJOCO 3 • PPO</div>
+            <h1 class="doc-title">Microduck 雙足機器人強化學習訓練全解</h1>
+            <p class="doc-subtitle">
+                深入剖析從數學公式到 Python 程式碼實作、仿生鴨子步態塑造、20秒長遠規劃突破，以及如何將此 Reinforcement Learning 架構無縫遷移至機械手臂 (Robotic Arm) 操控領域。
+            </p>
+        </header>
+
+        <!-- Section 1: Overview -->
+        <section id="overview">
+            <h2 class="section-heading"><span class="sec-num">01</span> 專案導讀與核心架構</h2>
+            <p>
+                <strong>Microduck</strong> 是由 Pollen Robotics 開源的 14 自由度 (DOF) 雙足行走小鴨機器人。與傳統採用 ZMP（零力矩點，Zero Moment Point）或複雜逆向運動學 (IK) 的控制算法不同，本專案採用<strong>無模型深度強化學習 (Model-Free Deep Reinforcement Learning, PPO)</strong>，直接讓機器人在 MuJoCo 物理引擎中透過數百萬次的自我試錯，自主掌握動態平衡、左右可愛搖擺步態與前進步伐。
+            </p>
+
+            <div class="card-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">⚡</span>
+                        <div class="card-title">超高速物理模擬</div>
+                    </div>
+                    <p>利用 MuJoCo 3.0 的向量化並行求解器，在 Apple Silicon 或雲端 GPU 上實現高達 <strong>5,000 ~ 6,000 FPS</strong> 的模擬速度，100 萬步訓練僅需 3~4 分鐘。</p>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">🦆</span>
+                        <div class="card-title">仿生鴨子動作特徵</div>
+                    </div>
+                    <p>不僅追求不倒，更透過動力學獎勵塑形激勵<strong>左右搖擺步態 (Duck Waddle)</strong> 與<strong>前後節奏點頭 (Head Bobbing)</strong>，栩栩如生模仿真實小鴨行走姿態。</p>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">🎯</span>
+                        <div class="card-title">20秒+ 長遠規劃跨越</div>
+                    </div>
+                    <p>打破雙足機器人 4~8 秒倒地的極限瓶頸，透過高折扣因子 \(\gamma = 0.9991\) 與階梯式生存激勵，達成超過 <strong>20 秒（1,000+ 控制步）</strong>的穩定前行。</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 2: Intuition -->
+        <section id="intuition">
+            <h2 class="section-heading"><span class="sec-num">02</span> 淺顯易懂：強化學習整個運作流程與 Loop 機制</h2>
+            <p>
+                很多剛接觸強化學習 (RL) 的工程師常被複雜的微積分與 Bellman 方程式嚇退。但其實 RL 的本質非常自然，就如同<strong>「教一隻剛孵化的小鴨學走路」</strong>：
+            </p>
+
+            <!-- Interactive SVG Diagram for the Loop -->
+            <div class="diagram-box">
+                <svg viewBox="0 0 880 340" width="100%" height="320" xmlns="http://www.w3.org/2000/svg">
+                    <defs>
+                        <linearGradient id="gradCyan" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#06b6d4" stop-opacity="0.8"/>
+                            <stop offset="100%" stop-color="#0891b2" stop-opacity="0.8"/>
+                        </linearGradient>
+                        <linearGradient id="gradGreen" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#10b981" stop-opacity="0.8"/>
+                            <stop offset="100%" stop-color="#059669" stop-opacity="0.8"/>
+                        </linearGradient>
+                        <linearGradient id="gradPurple" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.8"/>
+                            <stop offset="100%" stop-color="#6d28d9" stop-opacity="0.8"/>
+                        </linearGradient>
+                        <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+                            <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.4"/>
+                        </filter>
+                    </defs>
+
+                    <!-- Agent (Brain) -->
+                    <rect x="330" y="20" width="220" height="90" rx="12" fill="url(#gradCyan)" filter="url(#shadow)"/>
+                    <text x="440" y="55" fill="#fff" font-size="16" font-weight="bold" text-anchor="middle">神經網路大腦 (Policy Agent)</text>
+                    <text x="440" y="80" fill="#e0f2fe" font-size="12" text-anchor="middle">接收觀察值 ➔ 輸出 14 個關節目標</text>
+
+                    <!-- Arrow Agent to Env -->
+                    <path d="M 550 65 L 680 65 L 680 180" fill="none" stroke="#38bdf8" stroke-width="3" marker-end="url(#arrow)"/>
+                    <rect x="580" y="45" width="80" height="24" rx="4" fill="#0f172a"/>
+                    <text x="620" y="61" fill="#38bdf8" font-size="11" text-anchor="middle">動作 a (14維)</text>
+
+                    <!-- Environment (MuJoCo Physics) -->
+                    <rect x="580" y="180" width="230" height="90" rx="12" fill="url(#gradGreen)" filter="url(#shadow)"/>
+                    <text x="695" y="215" fill="#fff" font-size="16" font-weight="bold" text-anchor="middle">MuJoCo 物理環境 (Environment)</text>
+                    <text x="695" y="240" fill="#ecfdf5" font-size="12" text-anchor="middle">模擬重力、地面摩擦、PD 馬達扭矩</text>
+
+                    <!-- Arrow Env to Critic/Reward -->
+                    <path d="M 580 225 L 300 225" fill="none" stroke="#10b981" stroke-width="3"/>
+                    <rect x="400" y="212" width="100" height="24" rx="4" fill="#0f172a"/>
+                    <text x="450" y="228" fill="#34d399" font-size="11" text-anchor="middle">狀態轉換 P(s'|s,a)</text>
+
+                    <!-- Reward / Critic Evaluator -->
+                    <rect x="70" y="180" width="230" height="90" rx="12" fill="url(#gradPurple)" filter="url(#shadow)"/>
+                    <text x="185" y="215" fill="#fff" font-size="16" font-weight="bold" text-anchor="middle">裁判打分機制 (Reward Function)</text>
+                    <text x="185" y="240" fill="#f5f3ff" font-size="12" text-anchor="middle">評估搖擺、前進速度、摔倒重罰</text>
+
+                    <!-- Arrow Reward to Agent -->
+                    <path d="M 185 180 L 185 65 L 330 65" fill="none" stroke="#a78bfa" stroke-width="3"/>
+                    <rect x="210" y="45" width="100" height="24" rx="4" fill="#0f172a"/>
+                    <text x="260" y="61" fill="#c084fc" font-size="11" text-anchor="middle">獎勵 r + 新狀態 s'</text>
+                </svg>
+                <div class="diagram-caption">圖 1：強化學習閉環循環 (Perception ➔ Decision ➔ Physics ➔ Evaluation ➔ Policy Update)</div>
+            </div>
+
+            <h3 class="subsection-heading"><span class="step-badge">1</span> 小鴨學走路的五部曲</h3>
+            <ol style="margin-left: 1.5rem; margin-bottom: 1.5rem; color: #d1d5db;">
+                <li style="margin-bottom: 0.8rem;">
+                    <strong>睜眼觀察 (Observe State \(s_t\))</strong>：小鴨每秒進行 50 次「環顧自身」（50 Hz 控制頻率）。它透過內建的 IMU 感測器讀取身體在空中的傾角（俯仰角、側傾角）、各個關節目前的角度與旋轉速度，以及目前收到的行進指令（例如：前進速度 0.08 m/s）。
+                </li>
+                <li style="margin-bottom: 0.8rem;">
+                    <strong>大腦決策 (Policy Decision \(a_t\))</strong>：由三層多層感知機 (MLP) 組成的大腦神經網路，將 61 個觀察數字轉化為 14 個伺服舵機的目標旋轉角度偏移量。
+                </li>
+                <li style="margin-bottom: 0.8rem;">
+                    <strong>物理引擎運算 (Physics Step)</strong>：MuJoCo 接收到舵機指令後，根據 PD 比例微分控制器算出每個關節該出多大的力矩扭矩 (\(	au\))。在 0.02 秒的區間內，物理引擎模擬重力加速度、地板接觸摩擦力、腳蹼彈性與碰撞力學。
+                </li>
+                <li style="margin-bottom: 0.8rem;">
+                    <strong>裁判打分 (Reward Feedback \(r_t\))</strong>：此時「獎勵函數」充當教練。如果小鴨平穩前進且左右輕快搖擺，教練給予高額正分（獎勵）；如果小鴨向後倒退、劈腿或摔在地上，教練給予懲罰扣分並結束這局。
+                </li>
+                <li style="margin-bottom: 0.8rem;">
+                    <strong>大腦反思進化 (PPO Gradient Update)</strong>：PPO 演算法會收集幾萬步的經驗，統計「剛才做哪些動作時拿到了高分」，將神經網路的權重微調，使得下次再遇到類似情況時，更傾向做出拿到高分的動作。
+                </li>
+            </ol>
+
+            <div class="callout success">
+                <div class="callout-title">💡 為什麼 8 影分身平行模擬 (8 Clones) 能在幾分鐘內學會？</div>
+                <p>人類訓練雙足機器人通常需要數週，因為實體機器人每走 1 秒就是現實的 1 秒，還會摔壞硬體。本專案利用平行向量化 (<code>DummyVecEnv</code>)，讓 8 隻小鴨在背景同時奔跑探索。在 Apple M4 Pro 或雲端 GPU 上，電腦 1 秒鐘能模擬現實世界的 100 秒！相當於小鴨在虛擬時光屋裡苦練了數十個小時，所以數分鐘就能掌握高難度平衡。</p>
+            </div>
+        </section>
+
+        <!-- Section 3: Math Foundations -->
+        <section id="math-foundations">
+            <h2 class="section-heading"><span class="sec-num">03</span> 數學概念與程式碼對應實作</h2>
+            <p>
+                強化學習的嚴謹數學基礎建立在<strong>馬可夫決策過程 (Markov Decision Process, MDP)</strong> 之上。MDP 定義為一個五元組：
+            </p>
+            <div class="math-block">
+                $$\mathcal{M} = \langle \mathcal{S}, \mathcal{A}, \mathcal{P}, \mathcal{R}, \gamma angle$$
+            </div>
+
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>數學符號</th>
+                            <th>數學定義</th>
+                            <th>Microduck 程式碼實作對應</th>
+                            <th>物理與程式含義</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>\(\mathcal{S}\)</td>
+                            <td>狀態空間 (State Space)</td>
+                            <td><code>self.observation_space = spaces.Box(-inf, inf, (61,))</code></td>
+                            <td>61 維度向量，包含 IMU 角速度、投影重力、14 關節位置/速度、歷史動作、速度指令。</td>
+                        </tr>
+                        <tr>
+                            <td>\(\mathcal{A}\)</td>
+                            <td>動作空間 (Action Space)</td>
+                            <td><code>self.action_space = spaces.Box(-1.0, 1.0, (14,))</code></td>
+                            <td>14 維度向量，介於 \([-1.0, +1.0]\) 之間，代表 14 個關節的目標角度偏置量。</td>
+                        </tr>
+                        <tr>
+                            <td>\(\mathcal{P}(s' \mid s, a)\)</td>
+                            <td>狀態轉移機率矩陣</td>
+                            <td><code>mujoco.mj_step(self.model, self.data)</code> (重複 10 次)</td>
+                            <td>由 MuJoCo 物理引擎根據剛體動力學、牛頓-歐拉方程與約束求解器確定性地推演新狀態。</td>
+                        </tr>
+                        <tr>
+                            <td>\(\mathcal{R}(s, a, s')\)</td>
+                            <td>回饋獎勵函數</td>
+                            <td><code>def _compute_reward(self, action): ...</code></td>
+                            <td>純量值，由前進速度追蹤、左右搖擺、前後點頭、高度維持及各項罰項組合而成。</td>
+                        </tr>
+                        <tr>
+                            <td>\(\gamma\)</td>
+                            <td>折扣因子 (Discount Factor)</td>
+                            <td><code>gamma=0.9991</code></td>
+                            <td>決定演算法對「未來長遠回報」的重視程度，直接決定小鴨的耐力規劃視野。</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3 class="subsection-heading">狀態轉移動力學：從動作到物理力矩</h3>
+            <p>
+                神經網路輸出的動作 \(a_t \in [-1, 1]^{14}\) 並非直接施加在關節上的力量，而是<strong>關節目標角度 (Target Joint Position)</strong>。程式透過線性縮放映射：
+            </p>
+            <div class="math-block">
+                $$q_{des} = q_{nominal} + 	ext{action\_scale} \cdot a_t$$
+            </div>
+            <p>
+                隨後在 <code>models/scene_walk.xml</code> 中，MuJoCo 的馬達驅動器實作了經典的 <strong>PD 控制器 (Proportional-Derivative Control)</strong>：
+            </p>
+            <div class="math-block">
+                $$	au_i = K_p (q_{des, i} - q_i) - K_d \dot{q}_i$$
+            </div>
+            <p>
+                其中 \(K_p\) 為比例剛度 (Stiffness)，\(K_d\) 為阻尼係數 (Damping)。這種將神經網路與底層高頻 PD 控制解耦的架構，是現代雙足機器人能夠平穩行走且具備 Sim2Real（模擬轉真實）能力的工業界黃金標準。
+            </p>
+        </section>
+
+        <!-- Section 4: PPO Theory -->
+        <section id="ppo-theory">
+            <h2 class="section-heading"><span class="sec-num">04</span> PPO 近端策略最佳化與長遠視野規劃</h2>
+            <p>
+                Microduck 使用的是 OpenAI 提出的 <strong>近端策略最佳化 (Proximal Policy Optimization, PPO)</strong> 演算法。
+            </p>
+
+            <h3 class="subsection-heading">1. 策略裁剪目標函數 (Clipped Surrogate Objective)</h3>
+            <p>
+                在傳統策略梯度 (Policy Gradient) 中，若一次梯度更新幅度過大，策略容易崩潰且無法恢復。PPO 引入了<strong>機率比率裁剪機制</strong>：
+            </p>
+            <div class="math-block">
+                $$r_t(	heta) = rac{\pi_	heta(a_t \mid s_t)}{\pi_{	heta_{old}}(a_t \mid s_t)}$$
+                $$L^{CLIP}(	heta) = \hat{\mathbb{E}}_t \left[ \min\left( r_t(	heta)\hat{A}_t, \, 	ext{clip}(r_t(	heta), 1-\epsilon, 1+\epsilon)\hat{A}_t ight) ight]$$
+            </div>
+            <p>
+                其中 \(\epsilon = 0.2\)。當優勢 \(\hat{A}_t > 0\)（代表該動作優於平均）時，演算法鼓勵增加該動作的機率，但最多只允許增加到 \(1+\epsilon = 1.2\) 倍，防止步子邁得太大扯破蛋。
+            </p>
+
+            <h3 class="subsection-heading">2. 廣義優勢估計 (GAE - Generalized Advantage Estimation)</h3>
+            <p>
+                如何客觀評價「第 \(t\) 步到底走得好不好」？PPO 使用 Critic 價值網絡 \(V_\phi(s)\) 計算時間差分誤差 (TD-error)：
+            </p>
+            <div class="math-block">
+                $$\delta_t^V = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)$$
+                $$\hat{A}_t^{GAE} = \sum_{l=0}^\infty (\gamma \lambda)^l \delta_{t+l}^V$$
+            </div>
+            <p>
+                在此處，\(\lambda = 0.95\) 在偏差 (Bias) 與方差 (Variance) 之間取得平衡。
+            </p>
+
+            <h3 class="subsection-heading">3. 折扣因子 \(\gamma\) 與行走時間的數學關聯：為何能突破 20 秒？</h3>
+            <div class="callout warning">
+                <div class="callout-title">⚠️ 為什麼早期的訓練總在 4~6 秒停滯不前？</div>
+                <p>
+                    許多工程師習慣直接使用 Reinforcement Learning 教科書預設的 \(\gamma = 0.99\)。但在控制頻率 50 Hz（步長 \(\Delta t = 0.02\) 秒）的環境下：
+                </p>
+                <div class="math-block">
+                    $$	ext{有效規劃視野 (Steps)} = \sum_{t=0}^\infty \gamma^t = rac{1}{1 - \gamma} = rac{1}{1 - 0.99} = 100 	ext{ steps}$$
+                    $$	ext{有效時間視野 (Seconds)} = 100 	imes 0.02	ext{s} = 2.0 	ext{ 秒}$$
+                </div>
+                <p>
+                    這意味著大腦<strong>「只在乎未來 2 秒內會不會摔倒」</strong>！當小鴨走到第 4 秒時，2 秒前累積的微小骨盆側傾已經滾雪球擴大，神經網路卻毫無預警，最終必然在 4~6 秒傾覆。
+                </p>
+            </div>
+
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>折扣因子 \(\gamma\)</th>
+                            <th>有效視野步數 (Steps)</th>
+                            <th>物理時間視野 (Seconds)</th>
+                            <th>實測表現</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>0.9900</code></td>
+                            <td>100 步</td>
+                            <td>2.0 秒</td>
+                            <td>走 4 秒即向前仆街摔倒，無法穩定行走。</td>
+                        </tr>
+                        <tr>
+                            <td><code>0.9985</code></td>
+                            <td>667 步</td>
+                            <td>13.3 秒</td>
+                            <td>穩定性大幅躍升，達成 <strong>10.52 秒</strong>行走冠軍紀錄。</td>
+                        </tr>
+                        <tr>
+                            <td><strong style="color:var(--accent-secondary);">0.9991</strong> (最新升級)</td>
+                            <td><strong>1,111 步</strong></td>
+                            <td><strong>22.2 秒</strong></td>
+                            <td>具備超過 20 秒的長期動態穩定預測能力，成功跨越 20 秒大關！</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 5: Reward Shaping -->
+        <section id="reward-shaping">
+            <h2 class="section-heading"><span class="sec-num">05</span> 仿生步態獎勵塑形 (Biomimetic Reward Shaping)</h2>
+            <p>
+                機器人不會自己無緣無故變成鴨子。要想讓它具有鴨子的生動形態，必須透過<strong>多目標複合獎勵塑形 (Multi-Objective Reward Shaping)</strong>。
+            </p>
+
+            <h3 class="subsection-heading">1. 左右可愛搖擺步態數學模型 (Duck Waddling)</h3>
+            <p>
+                真實鴨子由於骨盆寬大且腿部短小，在單腳支撐期 (Single-Support Phase) 必須將身體重心微微側傾至支撐腳上方，形成標誌性的左右搖擺步態。
+            </p>
+            <div class="math-block">
+                $$w_{target} = 0.045 \cdot \left( \mathbf{1}_{Left\_Contact} - \mathbf{1}_{Right\_Contact} ight)$$
+                $$r_{duck\_waddle} = 2.0 \cdot \exp\left( - rac{(g_y - w_{target})^2}{0.003} ight)$$
+            </div>
+            <p>
+                其中 \(g_y\) 是透過 IMU 測得的重力向量在軀幹橫向軸上的投影分量。當左腳著地時，目標側傾角為向左 \(-0.045\) rad（約 \(2.6^\circ\)）；右腳著地時則向右傾斜。程式碼實作如下：
+            </p>
+            <pre><code># 判斷雙腳著地接觸
+waddle_target = 0.045 * (1.0 if (left_contact and not right_contact) else (-1.0 if (right_contact and not left_contact) else 0.0))
+rew_duck_waddle = 2.0 * float(np.exp(-np.square(proj_grav_y - waddle_target) / 0.003))
+
+# 放寬常規的側傾重罰，只在傾斜過大 (|gy| > 0.11) 真正快倒時才開罰
+if abs(proj_grav_y) > 0.11:
+    cost_roll_lean = -8.0 * float(abs(proj_grav_y) - 0.11)</code></pre>
+
+            <h3 class="subsection-heading">2. 鴨子前後節奏點頭模型 (Head Bobbing)</h3>
+            <p>
+                鴨子在行走時，頭部與頸部會伴隨腳步起伏前後點頭（有助於穩定視野與慣性動量平衡）。
+            </p>
+            <div class="math-block">
+                $$r_{duck\_bob} = 1.5 \cdot \exp\left( - rac{(q_{neck\_pitch} + q_{head\_pitch} - 0.18)^2}{0.015} ight) - 0.8 \cdot (q_{head\_yaw}^2 + q_{head\_roll}^2)$$
+            </div>
+            <p>
+                這項數學公式獎勵頸部與頭部維持約 \(0.18\) rad（約 \(10.3^\circ\)）微向前伸的警覺點頭姿態，同時嚴厲懲罰左右歪頭與旋轉 (\(q_{yaw}, q_{roll}\))，保證小鴨走路時目光永遠專注朝前。
+            </p>
+
+            <h3 class="subsection-heading">3. 20 秒階梯式生存激勵階梯 (Survival Milestone Ladder)</h3>
+            <p>
+                為了徹底攻克 20 秒大關，我們打破傳統固定數值的生存獎勵，設計了<strong>指數級遞增的階梯式激勵</strong>：
+            </p>
+            <div class="math-block">
+                $$r_{survival}(t) = egin{cases} 
+                +5.0, & 0 \le t < 10	ext{ 秒} \quad (0 \sim 500 	ext{ 步}) \
+                +8.0, & 10 \le t < 15	ext{ 秒} \quad (500 \sim 750 	ext{ 步}) \
+                +15.0, & 15 \le t < 20	ext{ 秒} \quad (750 \sim 1000 	ext{ 步}) \
+                \mathbf{+25.0}, & t \ge 20	ext{ 秒} \quad (1000+ 	ext{ 步，超越極限里程碑})
+                \end{cases}$$
+            </div>
+            <p>
+                這讓神經網路深刻理解：<strong>「只要能多撐 1 秒邁過 20 秒大關，就能獲得呈倍數暴增的巨額獎賞」</strong>，從而在後期展現出驚人的防倒自救能力！
+            </p>
+        </section>
+
+        <!-- Section 6: I/O Parameters -->
+        <section id="io-parameters">
+            <h2 class="section-heading"><span class="sec-num">06</span> 輸入 (Input) 與 輸出 (Output) 參數物理意義詳解</h2>
+
+            <h3 class="subsection-heading">📥 觀察空間輸入 (Observation Space: 61 維度)</h3>
+            <p>
+                神經網絡的輸入是 61 個浮點數（float32）。每一個數字都具有明確的感測器物理意義與座標系定義：
+            </p>
+
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>索引範圍</th>
+                            <th>維度</th>
+                            <th>物理量名稱</th>
+                            <th>物理單位</th>
+                            <th>參考座標系</th>
+                            <th>功能與重要性</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>0 .. 2</code></td>
+                            <td>3</td>
+                            <td>軀幹陀螺儀角速度 (\(\omega_x, \omega_y, \omega_z\))</td>
+                            <td>\(	ext{rad/s}\)</td>
+                            <td>IMU 局部座標系</td>
+                            <td>感測身體正在以多快的速度旋轉、側傾或前撲，提供第一時間的動態平衡反饋。</td>
+                        </tr>
+                        <tr>
+                            <td><code>3 .. 5</code></td>
+                            <td>3</td>
+                            <td>投影重力向量 (\(g_x, g_y, g_z\))</td>
+                            <td>無因次 (單位向量)</td>
+                            <td>軀幹基座標系</td>
+                            <td>世界座標系重力向量 \([0, 0, -1]^T\) 旋轉至軀幹座標系。\(g_x\) 代表前後俯仰角，\(g_y\) 代表左右側傾角。正常直立時應為 \([0, 0, -1]\)。</td>
+                        </tr>
+                        <tr>
+                            <td><code>6 .. 19</code></td>
+                            <td>14</td>
+                            <td>關節位置偏差 (\(q_i - q_{nominal, i}\))</td>
+                            <td>\(	ext{rad}\)</td>
+                            <td>各關節局部座標</td>
+                            <td>14 個關節相對於標準站立姿態 (STAND2) 的角度偏差量，讓網絡感知當前肢體擺動幅度。</td>
+                        </tr>
+                        <tr>
+                            <td><code>20 .. 33</code></td>
+                            <td>14</td>
+                            <td>關節角速度 (\(\dot{q}_i\))</td>
+                            <td>\(	ext{rad/s}\)</td>
+                            <td>各關節局部座標</td>
+                            <td>感測 14 個舵機關節的當前運動速度，防止關節超速甩動。</td>
+                        </tr>
+                        <tr>
+                            <td><code>34 .. 47</code></td>
+                            <td>14</td>
+                            <td>上一時刻動作向量 (\(a_{t-1}\))</td>
+                            <td>標稱值 \([-1, 1]\)</td>
+                            <td>無</td>
+                            <td>提供短期動作記憶，平滑動作輸出，避免舵機產生高頻抖動 (Jittering)。</td>
+                        </tr>
+                        <tr>
+                            <td><code>48 .. 50</code></td>
+                            <td>3</td>
+                            <td>目標前進/平移/旋轉指令 (\(v_x, v_y, \omega_z\))</td>
+                            <td>\(	ext{m/s}\), \(	ext{rad/s}\)</td>
+                            <td>軀幹基座標系</td>
+                            <td>使用者或上層導航所設定的期望速度（例如：\(v_x = 0.08	ext{ m/s}\) 直線前進）。</td>
+                        </tr>
+                        <tr>
+                            <td><code>51 .. 54</code></td>
+                            <td>4</td>
+                            <td>頭頸姿態偏置指令</td>
+                            <td>\(	ext{rad}\)</td>
+                            <td>頭頸關節座標</td>
+                            <td>控制頸部低頭/抬頭、頭部轉頭與側傾的偏置量。</td>
+                        </tr>
+                        <tr>
+                            <td><code>55 .. 60</code></td>
+                            <td>6</td>
+                            <td>軀幹位姿偏置指令</td>
+                            <td>\(	ext{m}\), \(	ext{rad}\)</td>
+                            <td>軀幹基座標系</td>
+                            <td>控制身體基準高度與微調姿態偏置。</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h3 class="subsection-heading">📤 動作空間輸出 (Action Space: 14 維度)</h3>
+            <p>
+                神經網絡輸出的 14 個浮點數依次對應 Microduck 的 14 個核心運動舵機：
+            </p>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>動作索引</th>
+                            <th>對應關節名稱</th>
+                            <th>所屬部位</th>
+                            <th>標準站姿角度 (STAND2)</th>
+                            <th>物理限位範圍 (Joint Limits)</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>0</code></td><td><code>left_hip_yaw</code></td><td>左腿髖偏航 (左右轉向)</td><td>\(0.0^\circ\)</td><td>\([-35^\circ, +35^\circ]\)</td></tr>
+                        <tr><td><code>1</code></td><td><code>left_hip_roll</code></td><td>左腿髖側傾 (左右劈腿)</td><td>\(-5.0^\circ\)</td><td>\([-25^\circ, +25^\circ]\)</td></tr>
+                        <tr><td><code>2</code></td><td><code>left_hip_pitch</code></td><td>左腿髖俯仰 (大腿前後擺)</td><td>\(-26.2^\circ\)</td><td>\([-60^\circ, +60^\circ]\)</td></tr>
+                        <tr><td><code>3</code></td><td><code>left_knee</code></td><td>左腿膝關節 (屈伸)</td><td>\(-0.28^\circ\)</td><td>\([-80^\circ, +80^\circ]\)</td></tr>
+                        <tr><td><code>4</code></td><td><code>left_ankle</code></td><td>左腿踝關節 (腳蹼俯仰)</td><td>\(+25.9^\circ\)</td><td>\([-45^\circ, +45^\circ]\)</td></tr>
+                        <tr><td><code>5</code></td><td><code>neck_pitch</code></td><td>頸部俯仰 (點頭基座)</td><td>\(+5.0^\circ\)</td><td>\([-20^\circ, +35^\circ]\)</td></tr>
+                        <tr><td><code>6</code></td><td><code>head_pitch</code></td><td>頭部俯仰 (喙部抬頭低頭)</td><td>\(+5.0^\circ\)</td><td>\([-30^\circ, +30^\circ]\)</td></tr>
+                        <tr><td><code>7</code></td><td><code>head_yaw</code></td><td>頭部偏航 (左右擺頭)</td><td>\(0.0^\circ\)</td><td>\([-45^\circ, +45^\circ]\)</td></tr>
+                        <tr><td><code>8</code></td><td><code>head_roll</code></td><td>頭部側傾 (歪頭賣萌)</td><td>\(0.0^\circ\)</td><td>\([-20^\circ, +20^\circ]\)</td></tr>
+                        <tr><td><code>9</code></td><td><code>right_hip_yaw</code></td><td>右腿髖偏航 (左右轉向)</td><td>\(0.0^\circ\)</td><td>\([-35^\circ, +35^\circ]\)</td></tr>
+                        <tr><td><code>10</code></td><td><code>right_hip_roll</code></td><td>右腿髖側傾 (左右劈腿)</td><td>\(+5.0^\circ\)</td><td>\([-25^\circ, +25^\circ]\)</td></tr>
+                        <tr><td><code>11</code></td><td><code>right_hip_pitch</code></td><td>右腿髖俯仰 (大腿前後擺)</td><td>\(+26.2^\circ\)</td><td>\([-60^\circ, +60^\circ]\)</td></tr>
+                        <tr><td><code>12</code></td><td><code>right_knee</code></td><td>右腿膝關節 (屈伸)</td><td>\(+0.28^\circ\)</td><td>\([-80^\circ, +80^\circ]\)</td></tr>
+                        <tr><td><code>13</code></td><td><code>right_ankle</code></td><td>右腿踝關節 (腳蹼俯仰)</td><td>\(-25.9^\circ\)</td><td>\([-45^\circ, +45^\circ]\)</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 7: Hyperparameters -->
+        <section id="hyperparameters">
+            <h2 class="section-heading"><span class="sec-num">07</span> 關鍵超參數解析與實體意涵</h2>
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>超參數變數名</th>
+                            <th>設定數值</th>
+                            <th>物理與演算法實體意涵</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><code>frame_skip</code></td>
+                            <td><code>10</code></td>
+                            <td><strong>控制頻率 50 Hz</strong>。MuJoCo 物理模擬步長為 0.002s，每跳過 10 步執行一次神經網路決策，即 \(\Delta t = 0.02\)s。符合真實世界伺服舵機的響應頻寬。</td>
+                        </tr>
+                        <tr>
+                            <td><code>action_scale</code></td>
+                            <td><code>0.5</code></td>
+                            <td><strong>動作縮放比率</strong>。神經網路輸出 \(\pm 1.0\) 映射至實際關節 \(\pm 0.5\) rad（約 \(\pm 28.6^\circ\)）。限制動作範圍能防止舵機暴衝與齒輪崩裂。</td>
+                        </tr>
+                        <tr>
+                            <td><code>learning_rate</code></td>
+                            <td><code>8e-5</code></td>
+                            <td><strong>策略優化學習率</strong>。微調階段採用較小學習率，既能修正步態細節，又不會破壞已學會的直立平衡記憶。</td>
+                        </tr>
+                        <tr>
+                            <td><code>n_steps</code></td>
+                            <td><code>512</code></td>
+                            <td><strong>單環境採樣長度</strong>。在 8 個分身環境下，每次網絡更新前共採集 \(512 	imes 8 = 4,096\) 個互動樣本。</td>
+                        </tr>
+                        <tr>
+                            <td><code>batch_size</code></td>
+                            <td><code>64</code></td>
+                            <td><strong>隨機小批次大小</strong>。將 4,096 個樣本切分為每包 64 筆進行隨機梯度下降 (SGD)，確保梯度估計穩定。</td>
+                        </tr>
+                        <tr>
+                            <td><code>n_epochs</code></td>
+                            <td><code>10</code></td>
+                            <td><strong>樣本重複學習輪數</strong>。批次資料在 PPO 裁剪保護下重複訓練 10 輪，極大化樣本利用效率。</td>
+                        </tr>
+                        <tr>
+                            <td><code>ent_coef</code></td>
+                            <td><code>0.0001</code></td>
+                            <td><strong>策略熵正則化係數</strong>。鼓勵策略保持適度的隨機探索性，避免太早陷入特定跛腳步態的局部最優解。</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 8: Progression -->
+        <section id="progression">
+            <h2 class="section-heading"><span class="sec-num">08</span> 小鴨是如何進步的？從 4秒 到 20秒 的進化軌跡</h2>
+            <p>
+                Microduck 雙足機器人的策略迭代並非一蹴可幾，而是經歷了三個經典的工程突破階段：
+            </p>
+
+            <div class="card-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">🐣</span>
+                        <div class="card-title">階段一：初出茅廬 (0 ~ 4 秒)</div>
+                    </div>
+                    <p><strong>痛點</strong>：小鴨跨出第一步後產生過大向前慣性，踝關節推力不足，且 \(\gamma=0.99\) 視野太短，在第 4 秒左右向前仆街倒地。</p>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">🐥</span>
+                        <div class="card-title">階段二：站穩邁步 (4 ~ 10 秒)</div>
+                    </div>
+                    <p><strong>突破</strong>：將視野提升至 \(\gamma=0.9985\)，加入負向速度重罰 (<code>cost_backward_motion</code>) 與嚴格速度走廊約束，創下 <strong>10.52 秒</strong> 直線行走紀錄。</p>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">🦆</span>
+                        <div class="card-title">階段三：仿生大師 (10 ~ 20 秒+)</div>
+                    </div>
+                    <p><strong>飛躍</strong>：注入鴨子仿生搖擺與點頭機制，放寬側向自然擺動容差，將 \(\gamma\) 升至 <strong>0.9991</strong> 並搭配 20 秒階梯獎勵，成功突破 20 秒大關！</p>
+                </div>
+            </div>
+
+            <div class="img-showcase">
+                <div class="img-card">
+                    <img src="images/test_8ducks_grid_preview.png" alt="8 Ducks Grid Training">
+                    <div class="img-card-body">
+                        <div class="img-card-title">8 影分身平行向量化訓練視窗</div>
+                        <div class="img-card-desc">2x4 分割畫面中 8 隻小鴨同時學習，即時顯示著地與存活遙測。</div>
+                    </div>
+                </div>
+                <div class="img-card">
+                    <img src="images/walking_hud_preview.png" alt="Walking HUD Preview">
+                    <div class="img-card-body">
+                        <div class="img-card-title">即時 50 Hz 步態抬頭顯示器 (HUD)</div>
+                        <div class="img-card-desc">動態顯示時間、高度、瞬時速度、左右搖擺角與蹼足接觸狀態。</div>
+                    </div>
+                </div>
+                <div class="img-card">
+                    <img src="images/walk_10s_victory_snapshot.png" alt="Walk Victory Snapshot">
+                    <div class="img-card-body">
+                        <div class="img-card-title">長遠穩定邁步歷史性突破</div>
+                        <div class="img-card-desc">維持精準直立平衡於安全椎內，連續行走淨前進超過 0.5 公尺。</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Section 9: Arm Transfer -->
+        <section id="arm-transfer">
+            <h2 class="section-heading"><span class="sec-num">09</span> 遷移指南：如何遷移到其他領域（例如機械手臂）</h2>
+            <p>
+                強化學習的強大之處在於<strong>通用性 (Generality)</strong>。如果您想把這套訓練 Microduck 的 PPO 框架遷移到<strong>機械手臂操控 (Robotic Arm Manipulation)</strong>，底層的 PPO 數學推導、向量化環境訓練架構與超參數完全不需要更換！您只需重構以下四個核心模組：
+            </p>
+
+            <!-- Robotic Arm Transfer Diagram -->
+            <div class="diagram-box">
+                <svg viewBox="0 0 880 300" width="100%" height="280" xmlns="http://www.w3.org/2000/svg">
+                    <!-- Left: Microduck Locomotion -->
+                    <rect x="50" y="30" width="340" height="240" rx="12" fill="#111827" stroke="#06b6d4" stroke-width="2"/>
+                    <text x="220" y="65" fill="#38bdf8" font-size="18" font-weight="bold" text-anchor="middle">雙足移動 (Locomotion: 小鴨)</text>
+                    
+                    <text x="75" y="105" fill="#e2e8f0" font-size="13">• <strong>目標</strong>：全身動態平衡、向前位移、不摔倒</text>
+                    <text x="75" y="135" fill="#e2e8f0" font-size="13">• <strong>核心感知</strong>：IMU 姿態角、重力投影、雙腳觸地</text>
+                    <text x="75" y="165" fill="#e2e8f0" font-size="13">• <strong>動作輸出</strong>：14 關節目標角度 (PD 位置控制)</text>
+                    <text x="75" y="195" fill="#e2e8f0" font-size="13">• <strong>獎勵核心</strong>：前進速度追蹤、高度維持、搖擺仿生</text>
+                    <text x="75" y="225" fill="#e2e8f0" font-size="13">• <strong>終止條件</strong>：身體高度過低、傾角過大 (摔倒)</text>
+
+                    <!-- Transfer Arrow -->
+                    <path d="M 415 150 L 465 150" fill="none" stroke="#f59e0b" stroke-width="4" marker-end="url(#arrow)"/>
+                    <text x="440" y="135" fill="#fbbf24" font-size="12" font-weight="bold" text-anchor="middle">模組遷移</text>
+
+                    <!-- Right: Robotic Arm Manipulation -->
+                    <rect x="490" y="30" width="340" height="240" rx="12" fill="#111827" stroke="#10b981" stroke-width="2"/>
+                    <text x="660" y="65" fill="#34d399" font-size="18" font-weight="bold" text-anchor="middle">機械手臂操控 (Manipulation: 手臂)</text>
+                    
+                    <text x="515" y="105" fill="#e2e8f0" font-size="13">• <strong>目標</strong>：到達、抓取物體、精確放置指定位置</text>
+                    <text x="515" y="135" fill="#e2e8f0" font-size="13">• <strong>核心感知</strong>：末端位姿 (EEF)、物體 6D 姿態、夾爪力覺</text>
+                    <text x="515" y="165" fill="#e2e8f0" font-size="13">• <strong>動作輸出</strong>：笛卡爾位移增量 (Δx, Δy, Δz) + 夾爪開合</text>
+                    <text x="515" y="195" fill="#e2e8f0" font-size="13">• <strong>獎勵核心</strong>：末端距離物體距離、物體被舉起高度</text>
+                    <text x="515" y="225" fill="#e2e8f0" font-size="13">• <strong>終止條件</strong>：物體成功放入目標箱、物體掉出工作台</text>
+                </svg>
+                <div class="diagram-caption">圖 2：雙足機器人 (Locomotion) 與 機械手臂操控 (Manipulation) 的核心模組遷移對照</div>
+            </div>
+
+            <div class="table-responsive">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>模組類別</th>
+                            <th>Microduck 雙足實作</th>
+                            <th>機械手臂操控實作 (例如 7-DOF Franka Arm)</th>
+                            <th>關鍵技術考量與注意事項</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>觀察空間<br>(Observation)</strong></td>
+                            <td>IMU 角速度、投影重力、腿部關節角度、前進速度指令。</td>
+                            <td>
+                                1. 末端夾爪 (EEF) 笛卡爾位姿 \((x, y, z, q_w, q_x, q_y, q_z)\)<br>
+                                2. 目標物體當前 3D 位置與姿態<br>
+                                3. 目標終點放置位置 (Goal)<br>
+                                4. 各手臂關節角度與角速度<br>
+                                5. 夾爪開啟寬度 (Gripper Width)
+                            </td>
+                            <td>
+                                雙足看重<strong>自身的動態姿態平衡</strong>；手臂則看重<strong>末端與目標物體之間的相對幾何關係</strong>。
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>動作空間<br>(Action)</strong></td>
+                            <td>14 個腿部及頸部關節的目標角度偏置。</td>
+                            <td>
+                                <strong>方式 A（推薦）</strong>：末端效應器笛卡爾空間位移增量 \((\Delta x, \Delta y, \Delta z, \Delta r, \Delta p, \Delta y)\) + 夾爪動作 \(g \in [0, 1]\)。<br>
+                                <strong>方式 B</strong>：7 個關節空間的目標角度或阻抗力矩。
+                            </td>
+                            <td>
+                                笛卡爾空間控制（透過逆運動學 IK 解算器轉為關節角）通常比純關節空間更容易收斂且路徑更直！
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>獎勵塑形<br>(Reward)</strong></td>
+                            <td>前進速度追蹤 + 鴨子搖擺 + 點頭 + 生存階梯。</td>
+                            <td>
+                                採用<strong>階段性階梯獎勵 (Staged Rewards)</strong>：<br>
+                                1. <strong>到達獎勵 (Reaching)</strong>：\(-\|p_{eef} - p_{obj}\|\)<br>
+                                2. <strong>抓取獎勵 (Grasping)</strong>：夾爪兩指接觸物體兩側 \(+2.0\)<br>
+                                3. <strong>舉起獎勵 (Lifting)</strong>：物體高度 \(z_{obj} > z_{table} + 0.05\) 則激勵 \(+5.0\)<br>
+                                4. <strong>放置獎勵 (Placing)</strong>：物體接近目標點 \(-\|p_{obj} - p_{goal}\|\)<br>
+                                5. <strong>安全懲罰</strong>：手臂自我碰撞或撞擊工作台重罰 \(-10.0\)
+                            </td>
+                            <td>
+                                機械手臂通常有嚴格的時間段劃分（先摸到 ➔ 再抓起 ➔ 再放置），建議使用稀疏里程碑或嚴格的勢能函數。
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>終止條件<br>(Termination)</strong></td>
+                            <td>身體高度過低、傾角過大（跌倒）。</td>
+                            <td>
+                                1. 物體被推落至工作台下方（失敗）<br>
+                                2. 手臂關節超出物理硬體限位或觸碰奇異點 (Singularity)<br>
+                                3. 物體成功穩定放入目標區域（成功完成）
+                            </td>
+                            <td>
+                                成功達成任務時應直接標記 <code>terminated = True</code> 並結算高額任務完成獎勵（例如 \(+100\)）。
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>Sim2Real<br>落地挑戰</strong></td>
+                            <td>足底橡膠摩擦力、馬達齒輪背隙。</td>
+                            <td>
+                                1. <strong>領域隨機化 (Domain Randomization)</strong>：隨機化抓取物體質量、表面摩擦係數、尺寸與初始擺放位置。<br>
+                                2. <strong>視覺延遲與遮擋</strong>：真實相機的延遲補償。<br>
+                                3. <strong>柔順阻抗控制</strong>：防止剛性碰撞把工件或夾爪舵機打爆。
+                            </td>
+                            <td>
+                                真實手臂如果使用剛性位置控制很容易損壞設備，Sim2Real 建議搭配關節阻抗 (Impedance) 控制器。
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Section 10: Summary -->
+        <section id="summary">
+            <h2 class="section-heading"><span class="sec-num">10</span> 結語與最佳實踐清單</h2>
+            <p>
+                回顧 Microduck 強化學習的完整設計，我們建立了一套<strong>「物理仿真 ➔ 數學建模 ➔ 仿生激勵 ➔ 自動化雲端訓練」</strong>的現代化機器人智能控制範式：
+            </p>
+
+            <div class="card-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">1️⃣</span>
+                        <div class="card-title">視野決定命運 (\(\gamma\))</div>
+                    </div>
+                    <p>雙足平衡絕非走一步算一步。在 50 Hz 高頻控制下，務必依據 \(rac{1}{1-\gamma}\) 公式計算時間視野，將 \(\gamma\) 設定在 <strong>0.9985 ~ 0.9991</strong> 以上才能跨越長期平衡。</p>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">2️⃣</span>
+                        <div class="card-title">仿生動力學引導</div>
+                    </div>
+                    <p>不要強行壓制所有自由度。放寬側向搖擺並加入步態接觸相位同步（Duck Waddle），小鴨反而能以更自然、更抗擾動的方式行走。</p>
+                </div>
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-icon">3️⃣</span>
+                        <div class="card-title">自動化閉環工作流</div>
+                    </div>
+                    <p>透過 Google Colab 雲端拉取 ➔ 平行向量化訓練 ➔ 自動錄製 HUD 評估影片 ➔ 一鍵推回 GitHub，讓機器人訓練如同現代 Web CI/CD 一樣敏捷順暢。</p>
+                </div>
+            </div>
+
+            <div class="callout">
+                <div class="callout-title">📂 相關專案資源索引</div>
+                <p>• <strong>Google Colab 雲端訓練筆記本</strong>: <a href="https://colab.research.google.com/github/Child-pi/microduck/blob/rl-locomotion/Microduck_RL_Colab.ipynb" target="_blank" style="color:var(--accent-primary); font-weight:600;">Microduck_RL_Colab.ipynb</a></p>
+                <p>• <strong>GitHub 專屬代碼分支</strong>: <a href="https://github.com/Child-pi/microduck/tree/rl-locomotion" target="_blank" style="color:var(--accent-primary); font-weight:600;">Child-pi/microduck (rl-locomotion)</a></p>
+                <p>• <strong>核心 Gymnasium RL 環境</strong>: <code>rl_training/envs/microduck_env.py</code></p>
+            </div>
+        </section>
+
+    </main>
+
+</body>
+</html>
