@@ -40,6 +40,10 @@ def parse_args():
     parser.add_argument("--log-dir", type=str, default="logs", help="TensorBoard log directory")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoints directory")
     parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint zip to resume from")
+    parser.add_argument("--duck-mimic", action="store_true", default=True, help="Enable biomimetic duck waddle, CPG, and head bobbing (default: True)")
+    parser.add_argument("--f-duck", type=float, default=1.8, help="Duck stride frequency in Hz (default: 1.8)")
+    parser.add_argument("--waddle-amp", type=float, default=0.075, help="Duck waddle roll amplitude in rad (default: 0.075)")
+    parser.add_argument("--recipe", type=str, default=None, choices=["duck_waddle", "from_scratch"], help="Preset recipe ('duck_waddle' fine-tunes from best checkpoint with biomimetic parameters)")
     parser.add_argument("--output-name", type=str, default="microduck_final", help="Final model filename without extension (default: microduck_final)")
     return parser.parse_args()
 
@@ -54,6 +58,17 @@ def make_env(rank: int, seed: int = 0) -> Callable[[], gym.Env]:
 
 def main():
     args = parse_args()
+
+    # Apply recipe presets if selected
+    if args.recipe == "duck_waddle":
+        if args.resume_from is None and os.path.exists(os.path.join(args.checkpoint_dir, "best", "best_model.zip")):
+            args.resume_from = os.path.join(args.checkpoint_dir, "best", "best_model.zip")
+        args.lr = 5e-5
+        args.ent_coef = 0.0005
+        args.gamma = 0.9985
+        args.output_name = "microduck_duck_walk_champion"
+        print("🦆 Applied 'duck_waddle' fine-tuning recipe (LR=5e-5, ent_coef=0.0005, gamma=0.9985)")
+
     os.makedirs(args.log_dir, exist_ok=True)
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
@@ -67,10 +82,17 @@ def main():
     print(f"Minibatch Size   : {args.batch_size}")
     print(f"Epochs per Update: {args.n_epochs}")
     print(f"Entropy Coef     : {args.ent_coef}")
+    print(f"Duck Mimic Mode  : {args.duck_mimic} (f={args.f_duck} Hz, roll_amp={args.waddle_amp} rad)")
     print(f"Checkpoints Dir  : {args.checkpoint_dir}")
     print(f"TensorBoard Logs : {args.log_dir}")
     print(f"Device           : {args.device}")
     print("=" * 70)
+
+    env_kwargs = {
+        "duck_mimic_mode": args.duck_mimic,
+        "duck_f_gait": args.f_duck,
+        "duck_waddle_amp": args.waddle_amp,
+    }
 
     # Vectorized training environments
     vec_env_cls = SubprocVecEnv if args.num_envs > 1 else DummyVecEnv
@@ -79,6 +101,7 @@ def main():
         n_envs=args.num_envs,
         seed=args.seed,
         vec_env_cls=vec_env_cls,
+        env_kwargs=env_kwargs,
     )
 
     # Vectorized evaluation environment
@@ -87,6 +110,7 @@ def main():
         n_envs=1,
         seed=args.seed + 1000,
         vec_env_cls=DummyVecEnv,
+        env_kwargs=env_kwargs,
     )
 
     # Callbacks

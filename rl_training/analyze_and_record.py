@@ -97,20 +97,29 @@ def evaluate_and_record(
             if (g1 == env.floor_geom_id and g2 == env.right_foot_geom_id) or (g2 == env.floor_geom_id and g1 == env.right_foot_geom_id):
                 rc = True
 
+        # Foot positions & neck/head pitch
+        lf_z = float(env.data.site_xpos[env.left_foot_site_id][2])
+        rf_z = float(env.data.site_xpos[env.right_foot_site_id][2])
+        joint_pos = env.data.qpos[7:21]
+        head_pitch_deg = float(np.rad2deg(joint_pos[5] + joint_pos[6]))
+        phase = float(getattr(env.unwrapped, "gait_phase", 0.0))
+        waddle_target = float(getattr(env.unwrapped, "duck_waddle_amp", 0.075) * np.sin(phase))
+
         # Draw HUD on frame
         hud = rgb.copy()
         time_sec = s * 0.02
-        cv2.putText(hud, f"Time: {time_sec:.2f}s  Step: {s}/{max_steps}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 255), 2)
-        cv2.putText(hud, f"Dist X: {dist_x:+.3f}m  Vel: {linvel[0]:+.2f}m/s (cmd {target_vx:.2f})", (20, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-        cv2.putText(hud, f"Height Z: {z:.3f}m  Pitch gx: {grav[0]:+.2f}  Roll gy: {grav[1]:+.2f}", (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
+        cv2.putText(hud, f"Time: {time_sec:.2f}s  Step: {s}/{max_steps}  [DUCK GAIT]", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.70, (0, 255, 255), 2)
+        cv2.putText(hud, f"Dist X: {dist_x:+.3f}m  Vel: {linvel[0]:+.2f}m/s (cmd {target_vx:.2f})", (20, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 2)
+        cv2.putText(hud, f"Height: {z:.3f}m  Roll: {grav[1]:+.2f} (waddle tgt: {waddle_target:+.2f})", (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 2)
+        cv2.putText(hud, f"Head Bob: {head_pitch_deg:+.1f} deg  Phase: {phase:.2f} rad", (20, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 255, 200), 2)
 
-        # Foot indicators
-        l_color = (0, 255, 0) if lc else (100, 100, 100)
-        r_color = (0, 255, 0) if rc else (100, 100, 100)
-        cv2.rectangle(hud, (20, 115), (90, 145), l_color, -1)
-        cv2.putText(hud, "L FOOT", (25, 137), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
-        cv2.rectangle(hud, (105, 115), (175, 145), r_color, -1)
-        cv2.putText(hud, "R FOOT", (110, 137), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+        # Foot indicators with clearance in mm
+        l_color = (0, 255, 0) if lc else (60, 60, 200)
+        r_color = (0, 255, 0) if rc else (60, 60, 200)
+        cv2.rectangle(hud, (20, 125), (130, 155), l_color, -1)
+        cv2.putText(hud, f"L:{lf_z*1000:.0f}mm", (25, 146), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        cv2.rectangle(hud, (145, 125), (255, 155), r_color, -1)
+        cv2.putText(hud, f"R:{rf_z*1000:.0f}mm", (150, 146), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
         frames.append(hud)
         telemetry.append((s, time_sec, z, dist_x, linvel[0], grav[0], grav[1], lc, rc))
@@ -149,12 +158,14 @@ def evaluate_and_record(
         for f in frames:
             vw.write(cv2.cvtColor(f, cv2.COLOR_RGB2BGR))
         vw.release()
-        # If ffmpeg command line is available, convert to H.264
+        # If ffmpeg is available, ensure H.264 web compatibility
         try:
+            import shutil
+            ffmpeg_bin = shutil.which("ffmpeg") or ("/opt/homebrew/bin/ffmpeg" if os.path.exists("/opt/homebrew/bin/ffmpeg") else "ffmpeg")
             temp_raw = output_video + ".temp.mp4"
             os.replace(output_video, temp_raw)
             ret = subprocess.run(
-                ["ffmpeg", "-y", "-i", temp_raw, "-vcodec", "libx264", "-pix_fmt", "yuv420p", output_video],
+                [ffmpeg_bin, "-y", "-i", temp_raw, "-vcodec", "libx264", "-pix_fmt", "yuv420p", output_video],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
