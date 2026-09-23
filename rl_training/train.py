@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument("--duck-mimic", action="store_true", default=True, help="Enable biomimetic duck waddle, CPG, and head bobbing (default: True)")
     parser.add_argument("--f-duck", type=float, default=1.8, help="Duck stride frequency in Hz (default: 1.8)")
     parser.add_argument("--waddle-amp", type=float, default=0.075, help="Duck waddle roll amplitude in rad (default: 0.075)")
-    parser.add_argument("--recipe", type=str, default=None, choices=["duck_waddle", "from_scratch"], help="Preset recipe ('duck_waddle' fine-tunes from best checkpoint with biomimetic parameters)")
+    parser.add_argument("--recipe", type=str, default=None, choices=["duck_waddle", "official_enhanced", "from_scratch"], help="Preset recipe ('duck_waddle' fine-tunes with biomimetic duck waddle, 'official_enhanced' incorporates Pollen upstream cadence and filters)")
     parser.add_argument("--output-name", type=str, default="microduck_final", help="Final model filename without extension (default: microduck_final)")
     return parser.parse_args()
 
@@ -68,6 +68,16 @@ def main():
         args.gamma = 0.9985
         args.output_name = "microduck_duck_walk_champion"
         print("🦆 Applied 'duck_waddle' fine-tuning recipe (LR=5e-5, ent_coef=0.0005, gamma=0.9985)")
+    elif args.recipe == "official_enhanced":
+        if args.resume_from is None and os.path.exists(os.path.join(args.checkpoint_dir, "best", "best_model.zip")):
+            args.resume_from = os.path.join(args.checkpoint_dir, "best", "best_model.zip")
+        args.lr = 1e-4
+        args.ent_coef = 0.001
+        args.gamma = 0.995
+        args.f_duck = 2.5  # 5 steps/s cadence matching Pollen official benchmark
+        args.waddle_amp = 0.08
+        args.output_name = "microduck_official_enhanced"
+        print("🦆 Applied 'official_enhanced' recipe (Pollen 5 steps/s cadence, EMA head droop filter, Air-time window)")
 
     os.makedirs(args.log_dir, exist_ok=True)
     os.makedirs(args.checkpoint_dir, exist_ok=True)
