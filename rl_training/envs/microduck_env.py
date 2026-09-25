@@ -63,8 +63,8 @@ DEFAULT_JOINT_POS = np.array(
         -0.457924,  # left_hip_pitch (~ -26.24 deg)
         -0.004940,  # left_knee (~ -0.28 deg)
         0.452984,  # left_ankle (~ +25.95 deg)
-        0.08726646,  # neck_pitch (~ +5 deg, upright CoM)
-        0.08726646,  # head_pitch (~ +5 deg, upright CoM)
+        0.34906585,  # neck_pitch (~ +20 deg, matching STAND2 keyframe)
+        0.34906585,  # head_pitch (~ +20 deg, matching STAND2 keyframe)
         0.0,  # head_yaw
         0.0,  # head_roll
         0.0,  # right_hip_yaw
@@ -92,7 +92,7 @@ class MicroduckEnv(gym.Env):
      48..61 (13): Command vector:
                   48..51 (3): [v_x, v_y, omega_yaw]
                   51..55 (4): [neck_pitch, head_pitch, head_yaw, head_roll]
-                  55..57 (2): body [x, y] (0, 0)
+                  55..57 (2): [sin(phi), cos(phi)] CPG cyclic phase clock (or body x, y)
                   57     (1): body z (0)
                   58     (1): body roll (0)
                   59     (1): body pitch (0)
@@ -112,7 +112,7 @@ class MicroduckEnv(gym.Env):
         self,
         model_path: Optional[str] = None,
         frame_skip: int = 10,  # 10 * 0.002s = 0.02s (50 Hz control)
-        action_scale: float = 0.5,
+        action_scale: float = 1.0,  # 1.0 matches Pollen Robotics official for full swing authority
         max_episode_steps: int = 1500,  # 1500 steps * 0.02s = 30.0s (enables 20s+ breakthrough!)
         render_mode: Optional[str] = None,
         render_width: int = 640,
@@ -215,6 +215,12 @@ class MicroduckEnv(gym.Env):
         self.prev_left_contact = True
         self.prev_right_contact = True
 
+        if self.duck_mimic_mode:
+            self.commands[7] = 0.0  # sin(0) = 0.0
+            self.commands[8] = 1.0  # cos(0) = 1.0
+        else:
+            self.commands[7:9] = 0.0
+
         # Reset MuJoCo physics to nominal standing keyframe
         if self.stand_key_id != -1:
             mujoco.mj_resetDataKeyframe(self.model, self.data, self.stand_key_id)
@@ -266,8 +272,12 @@ class MicroduckEnv(gym.Env):
         self.commands[6] = self.np_random.uniform(-0.03, 0.03)  # head roll
 
         # Body commands: [x, y, z, roll, pitch, yaw]
-        # x, y, yaw are 0; z, roll, pitch small offsets
-        self.commands[7:9] = 0.0
+        # In duck_mimic_mode, commands[7:9] carry [sin(phi), cos(phi)] CPG cyclic clock
+        if self.duck_mimic_mode:
+            self.commands[7] = float(np.sin(self.gait_phase))
+            self.commands[8] = float(np.cos(self.gait_phase))
+        else:
+            self.commands[7:9] = 0.0
         self.commands[9] = self.np_random.uniform(-0.005, 0.005)  # z
         self.commands[10] = self.np_random.uniform(-0.03, 0.03)   # roll
         self.commands[11] = self.np_random.uniform(-0.03, 0.03)   # pitch
@@ -286,12 +296,19 @@ class MicroduckEnv(gym.Env):
 
         self.current_step += 1
 
-        # Advance biomimetic duck CPG gait phase
+        # Advance biomimetic duck CPG gait phase and cyclic clock in observation
         cmd_vx = self.commands[0]
-        if abs(cmd_vx) > 0.02:
+        if abs(cmd_vx) > 0.02 and self.duck_mimic_mode:
             self.gait_phase = (2.0 * np.pi * self.duck_f_gait * self.current_step * self.dt) % (2.0 * np.pi)
+            self.commands[7] = float(np.sin(self.gait_phase))
+            self.commands[8] = float(np.cos(self.gait_phase))
         else:
             self.gait_phase = 0.0
+            if self.duck_mimic_mode:
+                self.commands[7] = 0.0
+                self.commands[8] = 1.0
+            else:
+                self.commands[7:9] = 0.0
 
         # Resample commands periodically if enabled
         if self.resample_commands and (self.current_step % int(self.resample_interval / self.dt) == 0):
@@ -371,25 +388,25 @@ class MicroduckEnv(gym.Env):
         lin_vel_err = np.sum(np.square(lin_vel_trunk[:2] - np.array([cmd_vx, cmd_vy])))
         rew_lin_vel = np.exp(-lin_vel_err / 0.03)
 
-        # 2. Direct forward progress reward and strict backward motion penalty
+        # 2. Direct forward progress reward and moderate backward motion penalty
         cost_backward_motion = 0.0
         cost_stand_still = 0.0
         rew_progress = 0.0
         if cmd_vx > 0.03:
             if lin_vel_trunk[0] < 0.0:
-                cost_backward_motion = -16.0 * float(abs(lin_vel_trunk[0]))  # Heavy penalty for moving backwards
-            elif lin_vel_trunk[0] < 0.02:
-                cost_stand_still = -3.0  # Penalize stalling
+                cost_backward_motion = -6.0 * float(abs(lin_vel_trunk[0]))  # Penalty for moving backwards
+            elif lin_vel_trunk[0] < 0.01:
+                cost_stand_still = -1.5  # Gentle incentive to initiate motion
             else:
-                rew_progress = 3.5 * float(np.clip(lin_vel_trunk[0], 0.0, cmd_vx * 1.2))
+                rew_progress = 4.0 * float(np.clip(lin_vel_trunk[0], 0.0, cmd_vx * 1.5))
         elif cmd_vx < -0.03:
-            rew_progress = -3.0 * float(np.clip(lin_vel_trunk[0], cmd_vx * 1.2, 0.0))
+            rew_progress = -4.0 * float(np.clip(lin_vel_trunk[0], cmd_vx * 1.5, 0.0))
 
         # Unwanted excessive lateral drift penalty (permits natural duck waddle sway <= 0.08 m/s)
         lateral_err = abs(lin_vel_trunk[1] - cmd_vy)
         cost_lateral_vel = 0.0
         if lateral_err > 0.08:
-            cost_lateral_vel = -8.0 * float(lateral_err - 0.08)**2
+            cost_lateral_vel = -4.0 * float(lateral_err - 0.08)**2
 
         # 3. Angular velocity (yaw) tracking reward
         ang_vel_err = np.square(ang_vel_trunk[2] - cmd_omega)
@@ -534,14 +551,14 @@ class MicroduckEnv(gym.Env):
         tilt_sq = float(np.square(proj_grav_x) + np.square(proj_grav_y))
         rew_upright = 2.0 * float(np.exp(-tilt_sq / 0.05))
 
-        # Direct penalty for excessive forward/backward leaning (sharper to prevent forward head tumble)
+        # Direct penalty for excessive forward/backward leaning (allows dynamic pitch excursion during waddle)
         cost_forward_lean = 0.0
-        if proj_grav_x < -0.06:  # Forward tilt > ~3.4 deg
-            cost_forward_lean = -18.0 * float(-proj_grav_x - 0.06)
+        if proj_grav_x < -0.26:  # Forward tilt > ~15.0 deg
+            cost_forward_lean = -4.0 * float(-proj_grav_x - 0.26)
 
         cost_backward_lean = 0.0
-        if proj_grav_x > 0.07:   # Backward tilt > ~4.0 deg
-            cost_backward_lean = -15.0 * float(proj_grav_x - 0.07)
+        if proj_grav_x > 0.20:   # Backward tilt > ~11.5 deg
+            cost_backward_lean = -4.0 * float(proj_grav_x - 0.20)
 
         # Overspeed penalty (prevents runaway acceleration sprinting)
         cost_overspeed = 0.0
@@ -561,7 +578,8 @@ class MicroduckEnv(gym.Env):
             0.3, 0.4, 0.5, 0.4, 0.6    # right: yaw, roll, pitch, knee, ankle
         ], dtype=np.float32)
         joint_err = np.square(joint_pos - DEFAULT_JOINT_POS)
-        cost_joint_drift = -0.05 * float(np.sum(joint_weights * joint_err))
+        drift_scale = 0.005 if abs(cmd_vx) > 0.02 else 0.04
+        cost_joint_drift = -drift_scale * float(np.sum(joint_weights * joint_err))
 
         # 8. 20-Second Continuous Survival Milestone Ladder
         if (trunk_z > 0.090 and abs(proj_grav_x) < 0.14 and abs(proj_grav_y) < 0.18 and 0.02 <= lin_vel_trunk[0] <= cmd_vx + 0.10):
@@ -580,7 +598,7 @@ class MicroduckEnv(gym.Env):
 
         # 9. Smoothness & energy penalties (calibrated action diff matching upstream)
         action_diff = np.sum(np.square(action - self.last_action))
-        cost_action_rate = -0.10 * action_diff
+        cost_action_rate = -0.02 * action_diff
 
         torques = self.data.actuator_force[:14]
         cost_energy = -0.0003 * np.sum(np.square(torques))
@@ -590,8 +608,8 @@ class MicroduckEnv(gym.Env):
         viol_high = np.maximum(0.0, joint_pos - jnt_ranges[:, 1])
         cost_joint_limits = -5.0 * np.sum(viol_low + viol_high)
 
-        # Pitch angular velocity damping to prevent oscillatory pitching
-        cost_pitch_rate = -0.60 * float(np.square(ang_vel_trunk[1]))
+        # Pitch angular velocity damping (calibrated to allow dynamic swing without runaway tumbling)
+        cost_pitch_rate = -0.05 * float(np.square(ang_vel_trunk[1]))
         cost_body_rates = -0.05 * float(np.square(ang_vel_trunk[2])) + cost_pitch_rate + cost_roll_rate
 
         # Total composite reward
@@ -654,22 +672,22 @@ class MicroduckEnv(gym.Env):
     def _is_terminated(self) -> bool:
         """Check fall or termination condition."""
         trunk_z = self.data.qpos[2]
-        # Ground impact termination: trunk drops below 0.062 m (nominal is ~0.12 m)
-        if trunk_z < 0.062:
+        # Ground impact termination: trunk drops below 0.058 m (nominal is ~0.11-0.12 m)
+        if trunk_z < 0.058:
             return True
 
         if self.imu_site_id != -1:
             site_mat = self.data.site_xmat[self.imu_site_id].reshape(3, 3)
             proj_gravity = site_mat.T @ np.array([0.0, 0.0, -1.0])
-            # Calibrated tilt limits: permits dynamic stepping pitch up to ~38 deg
-            # and roll waddle sway up to ~35 deg without false-positive cutoffs
-            if proj_gravity[0] < -0.62:  # Extreme forward pitch (> 38.3 deg)
+            # Calibrated tilt limits: permits dynamic stepping pitch up to ~42 deg
+            # and roll waddle sway up to ~38 deg without false-positive cutoffs
+            if proj_gravity[0] < -0.67:  # Extreme forward pitch (> 42.0 deg)
                 return True
-            if proj_gravity[0] > 0.60:   # Extreme backward pitch (> 36.8 deg)
+            if proj_gravity[0] > 0.62:   # Extreme backward pitch (> 38.3 deg)
                 return True
-            if abs(proj_gravity[1]) > 0.58:  # Extreme lateral roll (> 35.4 deg)
+            if abs(proj_gravity[1]) > 0.62:  # Extreme lateral roll (> 38.3 deg)
                 return True
-            if proj_gravity[2] > -0.65:  # Overturned / upside down (> 49.4 deg total tilt)
+            if proj_gravity[2] > -0.60:  # Overturned / upside down (> 53.1 deg total tilt)
                 return True
 
         return False

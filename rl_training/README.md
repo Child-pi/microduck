@@ -1,7 +1,7 @@
 # 🦆 Microduck Reinforcement Learning: 20s+ Biomimetic Duck Locomotion
 
-[![Open In Colab (Quick Training)](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/microduck/blob/rl-locomotion/Microduck_Colab_Training.ipynb)
-[![Open In Colab (Git Workflow)](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/microduck/blob/rl-locomotion/Microduck_RL_Colab.ipynb)
+[![Open In Colab (Quick Training)](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/microduck-private/blob/rl-locomotion/Microduck_Colab_Training.ipynb)
+[![Open In Colab (Git Workflow)](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Child-pi/microduck-private/blob/rl-locomotion/Microduck_RL_Colab.ipynb)
 
 This directory contains the reinforcement learning (PPO) training environment, simulation assets, pre-trained policy checkpoints, evaluation tools, and Google Colab integration for the **Pollen Robotics Microduck** 14-DOF bipedal robot.
 
@@ -35,7 +35,7 @@ Open either notebook directly in Google Colab:
 - 🔄 **[Microduck_RL_Colab.ipynb](Microduck_RL_Colab.ipynb)** (Full Repo Clone, Continuous 20s+ Training & Git Push-Back)
 
 ### Automated Workflow in Colab:
-1. **Auto-Download from GitHub**: Clones `https://github.com/Child-pi/microduck` (`rl-locomotion` branch) directly into Colab.
+1. **Auto-Download from GitHub**: Clones `https://github.com/Child-pi/microduck-private` (`rl-locomotion` branch) directly into Colab.
 2. **Headless Environment Setup**: Configures GPU hardware rendering (EGL) or CPU software rendering (OSMesa).
 3. **Continuous Biomimetic Training**: Iteratively trains 8 duck clones until crossing **20.0 seconds** ($\ge 1,000$ steps).
 4. **20s HUD Video Playback**: Evaluates the breakthrough model and plays the 20-second walking video directly in the notebook cell.

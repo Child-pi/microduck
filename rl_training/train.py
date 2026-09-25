@@ -40,6 +40,7 @@ def parse_args():
     parser.add_argument("--log-dir", type=str, default="logs", help="TensorBoard log directory")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoints directory")
     parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint zip to resume from")
+    parser.add_argument("--action-scale", type=float, default=1.0, help="Action scaling factor (default: 1.0 matching Pollen official)")
     parser.add_argument("--duck-mimic", action="store_true", default=True, help="Enable biomimetic duck waddle, CPG, and head bobbing (default: True)")
     parser.add_argument("--f-duck", type=float, default=1.8, help="Duck stride frequency in Hz (default: 1.8)")
     parser.add_argument("--waddle-amp", type=float, default=0.075, help="Duck waddle roll amplitude in rad (default: 0.075)")
@@ -63,11 +64,12 @@ def main():
     if args.recipe == "duck_waddle":
         if args.resume_from is None and os.path.exists(os.path.join(args.checkpoint_dir, "best", "best_model.zip")):
             args.resume_from = os.path.join(args.checkpoint_dir, "best", "best_model.zip")
-        args.lr = 5e-5
-        args.ent_coef = 0.0005
-        args.gamma = 0.9985
+        args.lr = 1e-4
+        args.ent_coef = 0.001
+        args.gamma = 0.995
+        args.action_scale = 1.0
         args.output_name = "microduck_duck_walk_champion"
-        print("🦆 Applied 'duck_waddle' fine-tuning recipe (LR=5e-5, ent_coef=0.0005, gamma=0.9985)")
+        print("🦆 Applied 'duck_waddle' fine-tuning recipe (LR=1e-4, ent_coef=0.001, gamma=0.995, action_scale=1.0)")
     elif args.recipe == "official_enhanced":
         if args.resume_from is None and os.path.exists(os.path.join(args.checkpoint_dir, "best", "best_model.zip")):
             args.resume_from = os.path.join(args.checkpoint_dir, "best", "best_model.zip")
@@ -76,8 +78,9 @@ def main():
         args.gamma = 0.995
         args.f_duck = 2.5  # 5 steps/s cadence matching Pollen official benchmark
         args.waddle_amp = 0.08
+        args.action_scale = 1.0
         args.output_name = "microduck_official_enhanced"
-        print("🦆 Applied 'official_enhanced' recipe (Pollen 5 steps/s cadence, EMA head droop filter, Air-time window)")
+        print("🦆 Applied 'official_enhanced' recipe (Pollen 5 steps/s cadence, EMA head droop filter, Air-time window, action_scale=1.0)")
 
     os.makedirs(args.log_dir, exist_ok=True)
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -88,6 +91,7 @@ def main():
     print(f"Total Timesteps  : {args.timesteps:,}")
     print(f"Parallel Envs    : {args.num_envs}")
     print(f"Learning Rate    : {args.lr}")
+    print(f"Action Scale     : {args.action_scale}")
     print(f"PPO n_steps      : {args.n_steps} (Total buffer: {args.n_steps * args.num_envs:,})")
     print(f"Minibatch Size   : {args.batch_size}")
     print(f"Epochs per Update: {args.n_epochs}")
@@ -102,6 +106,7 @@ def main():
         "duck_mimic_mode": args.duck_mimic,
         "duck_f_gait": args.f_duck,
         "duck_waddle_amp": args.waddle_amp,
+        "action_scale": args.action_scale,
     }
 
     # Vectorized training environments
