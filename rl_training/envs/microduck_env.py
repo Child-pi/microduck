@@ -112,7 +112,7 @@ class MicroduckEnv(gym.Env):
         self,
         model_path: Optional[str] = None,
         frame_skip: int = 10,  # 10 * 0.002s = 0.02s (50 Hz control)
-        action_scale: float = 1.0,  # 1.0 matches Pollen Robotics official for full swing authority
+        action_scale: float = 0.5,  # Reduced from 1.0 to 0.5 for smoother exploration early on
         max_episode_steps: int = 1500,  # 1500 steps * 0.02s = 30.0s (enables 20s+ breakthrough!)
         render_mode: Optional[str] = None,
         render_width: int = 640,
@@ -174,7 +174,7 @@ class MicroduckEnv(gym.Env):
 
         # Command ranges focused on stable, sustained forward locomotion
         self.command_ranges = {
-            "lin_vel_x": (0.05, 0.12),
+            "lin_vel_x": (0.00, 0.10),
             "lin_vel_y": (-0.02, 0.02),
             "ang_vel_yaw": (-0.15, 0.15),
         }
@@ -538,7 +538,7 @@ class MicroduckEnv(gym.Env):
         head_err = (neck_head_pos - neck_head_default) - neck_head_cmd
         alpha_ema = min(1.0, float(self.dt) / 1.0)
         self.head_bias_ema = (1.0 - alpha_ema) * self.head_bias_ema + alpha_ema * head_err
-        cost_head_bias = -1.8 * float(np.mean(np.abs(self.head_bias_ema)))
+        cost_head_bias = -0.5 * float(np.mean(np.abs(self.head_bias_ema)))
 
         # 3. Upstream Foot Clearance Target (0.02 m / 2 cm)
         cost_foot_clearance = 0.0
@@ -578,7 +578,7 @@ class MicroduckEnv(gym.Env):
             0.3, 0.4, 0.5, 0.4, 0.6    # right: yaw, roll, pitch, knee, ankle
         ], dtype=np.float32)
         joint_err = np.square(joint_pos - DEFAULT_JOINT_POS)
-        drift_scale = 0.005 if abs(cmd_vx) > 0.02 else 0.04
+        drift_scale = 0.002 if abs(cmd_vx) > 0.02 else 0.02
         cost_joint_drift = -drift_scale * float(np.sum(joint_weights * joint_err))
 
         # 8. 20-Second Continuous Survival Milestone Ladder
@@ -601,7 +601,7 @@ class MicroduckEnv(gym.Env):
         cost_action_rate = -0.02 * action_diff
 
         torques = self.data.actuator_force[:14]
-        cost_energy = -0.0003 * np.sum(np.square(torques))
+        cost_energy = -0.0001 * np.sum(np.square(torques))
 
         jnt_ranges = self.model.jnt_range[1:]
         viol_low = np.maximum(0.0, jnt_ranges[:, 0] - joint_pos)
