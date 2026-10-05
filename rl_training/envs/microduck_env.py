@@ -612,37 +612,23 @@ class MicroduckEnv(gym.Env):
         cost_pitch_rate = -0.05 * float(np.square(ang_vel_trunk[1]))
         cost_body_rates = -0.05 * float(np.square(ang_vel_trunk[2])) + cost_pitch_rate + cost_roll_rate
 
-        # Total composite reward
+        # PyTorch RL Tutorial standard tracking task reward weights
+        cost_termination = -4.0 if terminated else 0.0
+        cost_lin_vel_z = -2.0 * float(np.square(lin_vel_trunk[2]))
+        
         total_reward = (
-            1.5 * rew_lin_vel
-            + rew_progress
-            + rew_stepping
-            + rew_air_time
-            + rew_endurance
-            + rew_survival
-            + rew_duck_waddle
-            + rew_duck_head_bob
-            + rew_duck_crouch
-            + rew_toe_out
-            + cost_head_bias
-            + cost_foot_clearance
-            + cost_head_wobble
-            + cost_stand_still
-            + cost_backward_motion
-            + cost_overspeed
-            + cost_lateral_vel
-            + 1.0 * rew_ang_vel
-            + rew_upright
-            + cost_forward_lean
-            + cost_backward_lean
-            + cost_roll_lean
-            + 0.8 * rew_height
-            + cost_low_height
-            + cost_joint_drift
-            + cost_action_rate
-            + cost_energy
-            + cost_joint_limits
-            + cost_body_rates
+            2.0 * rew_lin_vel          # tracking
+            + 2.0 * rew_progress       # progress
+            + 2.0 * rew_upright        # upright
+            + 3.0 * rew_air_time       # air_time
+            + 2.0 * cost_foot_clearance# swing_height (clearance)
+            + 3.0 * rew_stepping       # phase_contact
+            + 1.0 * rew_ang_vel        # yaw_rate
+            - 0.05 * float(np.square(ang_vel_trunk[0]) + np.square(ang_vel_trunk[1])) # ang_vel_xy
+            - 0.1 * action_diff        # action_rate
+            + cost_joint_drift         # pose
+            + cost_lin_vel_z           # lin_vel_z
+            + cost_termination         # termination
         )
 
         reward_info = {
