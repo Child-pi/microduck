@@ -613,7 +613,7 @@ class MicroduckEnv(gym.Env):
         cost_body_rates = -0.05 * float(np.square(ang_vel_trunk[2])) + cost_pitch_rate + cost_roll_rate
 
         # PyTorch RL Tutorial standard tracking task reward weights
-        cost_termination = -4.0 if terminated else 0.0
+        cost_termination = -4.0 if self._is_terminated() else 0.0
         cost_lin_vel_z = -2.0 * float(np.square(lin_vel_trunk[2]))
         
         total_reward = (
