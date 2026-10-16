@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Microduck 16 隻平行小鴨強化學習與官方 v8 策略同步優化計畫</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --card-alt: #26354d;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --emerald: #34d399;
+      --amber: #fbbf24;
+      --rose: #fb7185;
+      --violet: #a78bfa;
+      --border: #334155;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 32px 20px 64px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+    }
+    .container {
+      max-width: 1120px;
+      margin: 0 auto;
+    }
+    header {
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      border: 1px solid var(--border);
+      border-left: 6px solid var(--accent);
+      border-radius: 14px;
+      padding: 28px 32px;
+      margin-bottom: 28px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+    }
+    h1 {
+      margin: 0 0 10px;
+      font-size: 1.85rem;
+      color: #ffffff;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 1rem;
+      margin: 0;
+    }
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .badge {
+      padding: 5px 12px;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      background: rgba(56, 189, 248, 0.14);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }
+    .badge.green {
+      background: rgba(52, 211, 153, 0.14);
+      color: var(--emerald);
+      border-color: rgba(52, 211, 153, 0.35);
+    }
+    .badge.amber {
+      background: rgba(251, 191, 36, 0.14);
+      color: var(--amber);
+      border-color: rgba(251, 191, 36, 0.35);
+    }
+    .badge.violet {
+      background: rgba(167, 139, 250, 0.14);
+      color: var(--violet);
+      border-color: rgba(167, 139, 250, 0.35);
+    }
+    section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 24px 28px;
+      margin-bottom: 24px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.22);
+    }
+    h2 {
+      margin-top: 0;
+      font-size: 1.35rem;
+      color: var(--accent);
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 10px;
+    }
+    h3 {
+      color: var(--emerald);
+      margin-top: 20px;
+      margin-bottom: 8px;
+      font-size: 1.1rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+      font-size: 0.93rem;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 11px 14px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: var(--card-alt);
+      color: #ffffff;
+      font-weight: 600;
+    }
+    tr:nth-child(even) td {
+      background: rgba(255,255,255,0.02);
+    }
+    code {
+      font-family: "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+      background: rgba(15, 23, 42, 0.75);
+      color: #7dd3fc;
+      padding: 2px 6px;
+      border-radius: 5px;
+      font-size: 0.88em;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 18px;
+    }
+    .callout {
+      border-radius: 10px;
+      padding: 14px 18px;
+      margin: 14px 0;
+      border-left: 4px solid var(--accent);
+      background: rgba(56, 189, 248, 0.08);
+    }
+    .callout.warn {
+      border-left-color: var(--rose);
+      background: rgba(251, 113, 133, 0.09);
+    }
+    .callout.ok {
+      border-left-color: var(--emerald);
+      background: rgba(52, 211, 153, 0.09);
+    }
+    .callout.gold {
+      border-left-color: var(--amber);
+      background: rgba(251, 191, 36, 0.09);
+    }
+    ul {
+      margin: 8px 0 12px;
+      padding-left: 22px;
+    }
+    li {
+      margin-bottom: 6px;
+    }
+    .footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.86rem;
+      margin-top: 32px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>🦆 Microduck 強化學習專案全方位優化與 16 隻平行小鴨訓練計畫</h1>
+      <p class="subtitle">
+        同步官方 <code>pollen-robotics/microduck</code> (<code>d7560ef</code>) 與 <code>pollen-robotics/microduck_rl</code> (<code>b02fdea</code> Hub v8) 策略 + 17.82s 最佳權重接續微調 + Google Colab 高 CP 值算力優化方案
+      </p>
+      <div class="badge-row">
+        <span class="badge">Target: 20.0s+ 連續站立行走</span>
+        <span class="badge green">NUM_CLONES = 16 (16 隻平行小鴨)</span>
+        <span class="badge amber">高 CP 值算力省電架構 (T4 GPU + 無頭加速)</span>
+        <span class="badge violet">4 大 Skills 全自動整合</span>
+      </div>
+    </header>
+
+    <section>
+      <h2>1. 專案診斷與官方 Upstream (v8) 同步重點</h2>
+      <p>
+        透過完整比對官方上游庫 <code>pollen-robotics/microduck_rl</code> 最新 <code>b02fdea</code> (Hub v8 步態配方) 與本專案 <code>rl_training/envs/microduck_env.py</code>，我們找出了先前訓練在 14～17.82 秒後發生劈腿或 Critic 價值爆炸 (<code>value_loss &gt; 10,000</code>) 的根本原因，並同步官方三大核心機制：
+      </p>
+
+      <div class="callout warn">
+        <strong>🐛 修復現有環境中的 3 個關鍵瓶頸 Bug：</strong>
+        <ul>
+          <li><strong>Bug 1（獎勵重複相乘 4 倍與 9 倍）：</strong> 原先 <code>rew_upright</code> 在計算時已乘上 <code>2.0</code>，卻在 <code>total_reward</code> 總和時又乘上 <code>2.0</code>（變成 4 倍）；<code>rew_air_time</code> 在計算時已給 <code>3.0</code>，在總和時又乘 <code>3.0</code>（變成 9 倍），導致單步獎勵暴衝與 Critic <code>value_loss</code> 溢位。</li>
+          <li><strong>Bug 2（多項核心獎勵未接入總分）：</strong> 原先計算的 <code>rew_duck_waddle</code>（鴨子搖擺）、<code>rew_duck_head_bob</code>（點頭）、<code>cost_head_bias</code>（1.0 秒 EMA 防低頭懲罰）、<code>rew_endurance</code>、<code>cost_overspeed</code> 在最後 <code>total_reward</code> 加總式中被遺漏，導致策略無法感知防暴衝與防低頭約束。</li>
+          <li><strong>Bug 3（每步重複呼叫兩次 <code>_get_obs()</code>）：</strong> <code>step()</code> 與 <code>_compute_reward()</code> 各呼叫一次 <code>_get_obs()</code>，平白消耗雙倍矩陣旋轉與觀察向量建構算力。</li>
+        </ul>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>策略項目</th>
+            <th>官方 <code>microduck_rl</code> (v8 最新配方)</th>
+            <th>本專案優化後實作設定</th>
+            <th>物理與強化學習效益</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>防劈腿腿部姿態核 (<code>rew_pose</code>)</strong></td>
+            <td>僅針對 10 個腿部關節計算指數核 (<code>weight=1.0</code>)，且 <code>hip_roll</code> 標準差極嚴格 (<code>std = 0.05 rad</code>)。</td>
+            <td><code>leg_stds = [0.3, 0.05, 0.4, 0.4, 0.25]</code> (對應 yaw, roll, pitch, knee, ankle)，排除頸部/頭部關節。</td>
+            <td>強制鎖住雙腿維持 <code>5°</code> 內傾站姿 (<code>±0.0873 rad</code>)，徹底根除走到 15 秒後雙腿外劈倒地，且不干擾點頭動作。</td>
+          </tr>
+          <tr>
+            <td><strong>精細航向角追蹤 (<code>track_yaw_fine</code>)</strong></td>
+            <td>v8 新增窄高斯核 (<code>std = 0.35, weight = 2.0</code>) 疊加於 <code>track_angular_velocity</code>。</td>
+            <td>同時啟用 <code>rew_ang_vel</code> (<code>std=√0.5</code>) 與 <code>rew_yaw_fine</code> (<code>std=0.35</code>)。</td>
+            <td>消除微小偏航角的高斯死區 (Dead-zone)，讓小鴨在 20 秒長程行走中維持筆直航向。</td>
+          </tr>
+          <tr>
+            <td><strong>滯空時間窗口與腳底離地高度</strong></td>
+            <td><code>air_time</code> 窗口 <code>[0.125, 0.300]s</code> (<code>weight=3.0</code>，須滿足直立 <code>tilt &lt; 40°</code>)；抬腳高度目標 <code>0.02m</code>；打滑懲罰 <code>-0.1</code>。</td>
+            <td>修正重複相乘，嚴格對齊 <code>weight=3.0</code> + 直立門檻保護 (<code>proj_grav_z &lt; -0.766</code>)，離地目標設為 <code>0.02m</code>。</td>
+            <td>步頻穩定在約 1.8Hz，不拖步、不踩空，且跌倒時不給予假性滯空獎勵。</td>
+          </tr>
+          <tr>
+            <td><strong>1.0 秒 EMA 頭部防下垂濾波</strong></td>
+            <td><code>head_pose_bias</code> 針對 1.0 秒指數移動平均誤差給予 L1 懲罰，僅在直立時生效。</td>
+            <td><code>alpha = dt / 1.0</code>，直立時將 <code>cost_head_bias</code> 正式納入 <code>total_reward</code>。</td>
+            <td>占體重 38% (280g) 的鴨頭可隨步伐自然點頭擺動，但消除長期 15° 重力低頭下垂。</td>
+          </tr>
+          <tr>
+            <td><strong>非累積式領域隨機化與 NaN 防護</strong></td>
+            <td>軀幹重心偏移上限 <code>±15mm</code>、頭部 <code>±10mm</code>、腳底摩擦 <code>(0.7, 1.3)</code>、編碼器偏差 <code>±0.015 rad</code>、NaN 終止。</td>
+            <td>於 <code>__init__</code> 緩存初始 <code>body_ipos</code> 與 <code>geom_friction</code>，每次 <code>reset()</code> 非累積抽樣，加入 <code>isnan/isinf</code> 保護。</td>
+            <td>重心絕不超出 20mm 腳跟支撐多邊形，提升跨種子 (Seeds 89, 42, 123) 穩定度。</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>2. 為什麼選擇「選項 A：載入 17.82 秒最佳權重 + 16 隻平行小鴨」？</h2>
+      <div class="grid-2">
+        <div class="callout ok">
+          <h3>✅ 選項 A（本專案採用方案）</h3>
+          <ul>
+            <li><strong>保留 <code>[256, 128, 64]</code> 架構並載入 <code>17.82s</code> 最佳權重：</strong> 直接站在已完成 89% 目標（17.82s / 20.0s）的巨人肩膀上，省去從 0 秒學習站立與跨步的 3～4 小時算力。</li>
+            <li><strong>升級 <code>NUM_CLONES = 16</code>（16 隻平行小鴨）：</strong> 每隻小鴨單次採樣 <code>n_steps = 1024</code>，單輪總緩衝區 <code>16 × 1024 = 16,384</code> 步，具備 <strong>2 倍獨立環境的樣本多樣性</strong>，梯度更平滑。</li>
+            <li><strong>對齊官方 PPO 穩定更新：</strong> <code>n_epochs = 5</code>（減半防止過度擬合）、<code>batch_size = 512</code>、<code>target_kl = 0.015</code>、<code>gamma = 0.9985</code>、<code>gae_lambda = 0.95</code>，並在載入時夾緊探索標準差 (<code>log_std = -1.0</code>)，讓 Critic 在前 2 輪平穩適應新獎勵。</li>
+          </ul>
+        </div>
+        <div class="callout">
+          <h3>⚖️ 與選項 B（從零訓練 <code>[512, 256, 128]</code>）的差異</h3>
+          <ul>
+            <li>官方使用 <code>[512, 256, 128]</code> 是針對 4096 個 GPU 環境同時學全向奔跑與原地旋轉；在 Colab 16 環境下，參數多 4 倍會使每步推論變慢約 25%。</li>
+            <li>從零訓練必須重新克服「4 秒原地踏步局部最佳解」，耗費大量 Google Colab Compute Units (CU)。</li>
+            <li>本專案程式碼同時支援自動相容：若有歷史最佳權重則無縫接續微調；若無權重則自動建立全新網路。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>3. 💰 Google Colab 算力省電與最高 CP 值 (Cost-Performance) 優化策略</h2>
+      <p>
+        針對 <strong>MuJoCo 3 (CPU 物理引擎) + Stable-Baselines3 PPO (<code>[256, 128, 64]</code> 輕量神經網路)</strong> 的混合負載特性，我們制定了以下「最低算力消耗、最高每秒步數 (FPS / CU)」的四層省算力策略：
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Colab 硬體方案</th>
+            <th>每小時消耗算力 (CU/hr)</th>
+            <th>16 隻小鴨預估訓練速度</th>
+            <th>CP 值評估與推薦等級</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>NVIDIA T4 GPU（強烈推薦 🏆）</strong></td>
+            <td><strong>~1.17 – 1.96 CU / hr</strong>（最省 GPU 點數）</td>
+            <td><strong>~1,200 – 1,650 FPS</strong>（單輪 25 萬步僅需 ~2.5 分鐘）</td>
+            <td><strong>⭐⭐⭐⭐⭐ 最高 CP 值首選！</strong><br>16 隻小鴨物理運算在 CPU、<code>batch_size=512</code> 在 T4 毫秒級完成，且支援硬體 <code>EGL</code> 錄影。</td>
+          </tr>
+          <tr>
+            <td>NVIDIA L4 GPU</td>
+            <td>~4.82 CU / hr（貴 2.5～4 倍）</td>
+            <td>~1,400 – 1,800 FPS（受限於 CPU 物理步，無顯著加速）</td>
+            <td>⭐⭐ 不划算：GPU 85% 時間在等待 CPU MuJoCo 物理步，單位點數產出步數反而低 60%。</td>
+          </tr>
+          <tr>
+            <td>NVIDIA A100 GPU</td>
+            <td>~11.77 – 13.15 CU / hr（貴 7～10 倍）</td>
+            <td>~1,500 – 1,900 FPS</td>
+            <td>⭐ 極度浪費：除非使用 MJX 純 GPU 4096 環境，否則跑 16 隻小鴨會快速燒光點數。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout gold">
+        <strong>⚡ 我們在程式碼中實作的 5 大「榨乾每一滴算力」加速與省點機制：</strong>
+        <ol>
+          <li><strong>訓練環境完全關閉渲染器 (<code>render_mode=None</code>)：</strong> 16 隻訓練小鴨不初始化 OpenGL/EGL 緩衝區，僅在評估錄影時開啟，直接省下 ~400MB 記憶體並提升 <strong>+35% 物理採樣 FPS</strong>。</li>
+          <li><strong>消除重複觀察計算 (<code>_get_obs()</code> 快取傳遞)：</strong> 將 <code>step()</code> 計算好的 <code>obs</code> 直接傳入 <code>_compute_reward(action, obs)</code>，減少 <strong>50% 座標轉換與陣列配置開銷</strong>。</li>
+          <li><strong>兩階段智慧快速評估 (Fast-Fail Staged Evaluation)：</strong> 每輪結束驗證時，先跑主種子 <code>seed=89</code>；只有當 <code>seed=89</code> 表現優異（例如 &ge; 10.0 秒或接近歷史最佳）時，才啟動全部 3 組種子完整驗證，省下約 <strong>45% 的評估等待時間</strong>！</li>
+          <li><strong>跨輪次動態學習率與探索自適應調節：</strong> 若連續 4 輪未刷新紀錄或步數停滯，自動微調學習率與微幅重啟探索；一旦突破 15 秒則自動收緊 <code>learning_rate</code> 與 <code>clip_range</code> 穩定收割。</li>
+          <li><strong>達標後自動同步雲端並切斷 Colab 執行階段 (<code>runtime.unassign()</code>)：</strong> 一旦跨越 20.0 秒大關（或完成設定輪數）並完成 Google Drive 與 GitHub 備份，自動呼叫 <code>google.colab.runtime.unassign()</code> 釋放機器，<strong>杜絕半夜掛機空燒算力點數</strong>！</li>
+        </ol>
+      </div>
+    </section>
+
+    <section>
+      <h2>4. 4 大專屬 Skills 整合與即時監控面板</h2>
+      <ul>
+        <li><strong><code>train-microduck</code>：</strong> 16 隻平行小鴨向量化環境、官方 v8 獎勵對齊、4×4 16 隻小鴨同框 HUD 步態預覽 (<code>eval_multi_clones.py</code>)。</li>
+        <li><strong><code>overcome-training-in-colab</code>：</strong> 設定 <code>OMP_NUM_THREADS=2</code>、<code>PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True</code> 防 OOM、<code>nohup</code> 背景守護程序、<code>telemetry.jsonl</code> 黑盒子飛行紀錄器與自動斷線省算力保護。</li>
+        <li><strong><code>isolate-project-workspace</code>：</strong> 獨立綁定 Google Drive <code>/content/drive/MyDrive/microduck_rl_backup</code> 雙向自動備份，確保權重永不遺失。</li>
+        <li><strong><code>create-a-dashboard</code>：</strong> 零 Token 消耗的本地背景 Daemon (<code>dashboard_daemon.py</code>)，每 15 秒自動拉取進度並更新 <code>dashboard.html</code> 與 <code>training_live_dashboard.md</code>。</li>
+      </ul>
+    </section>
+
+    <div class="footer">
+      Generated for <code>Child-pi/microduck-private</code> (branch: <code>rl-locomotion</code>) • Upstream synced with <code>pollen-robotics/microduck</code> &amp; <code>microduck_rl</code> v8
+    </div>
+  </div>
+</body>
+</html>

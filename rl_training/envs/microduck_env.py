@@ -122,6 +122,7 @@ class MicroduckEnv(gym.Env):
         duck_f_gait: float = 1.8,       # Duck stride frequency in Hz (1.8 Hz = ~0.55s per stride)
         duck_waddle_amp: float = 0.075, # Waddle roll amplitude in rad (~4.3 deg)
         duck_head_bob_amp: float = 0.07,# Head bobbing amplitude in rad (~4.0 deg)
+        domain_randomization: bool = False, # Official non-accumulating DR (CoM <= 15mm, friction, encoder bias)
         **kwargs,                       # Gracefully absorb extra kwargs passed by gym.make wrappers
     ):
         super().__init__()
@@ -148,6 +149,7 @@ class MicroduckEnv(gym.Env):
         self.duck_f_gait = duck_f_gait
         self.duck_waddle_amp = duck_waddle_amp
         self.duck_head_bob_amp = duck_head_bob_amp
+        self.domain_randomization = domain_randomization
         self.gait_phase = 0.0
 
         # Cache IDs
@@ -155,10 +157,25 @@ class MicroduckEnv(gym.Env):
         self.left_foot_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "left_foot")
         self.right_foot_site_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, "right_foot")
         self.trunk_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "trunk_base")
+        self.head_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "head")
         self.stand_key_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_KEY, "STAND")
         self.floor_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
         self.left_foot_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "left_foot_collision")
         self.right_foot_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "right_foot_collision")
+
+        # Cache nominal physics arrays for non-accumulating Domain Randomization (pollen-robotics/microduck_rl)
+        self.nominal_body_ipos = self.model.body_ipos.copy()
+        self.nominal_geom_friction = self.model.geom_friction.copy()
+        self.joint_qpos_bias = np.zeros(14, dtype=np.float32)
+
+        # Official microduck_rl v8 leg-only pose kernel indices & stds (tight hip_roll=0.05 stops leg splay!)
+        self.leg_joint_indices = np.array([0, 1, 2, 3, 4, 9, 10, 11, 12, 13], dtype=np.int32)
+        self.leg_std_walking = np.array(
+            [0.30, 0.05, 0.40, 0.40, 0.25, 0.30, 0.05, 0.40, 0.40, 0.25], dtype=np.float32
+        )
+        self.leg_std_standing = np.array(
+            [0.05, 0.05, 0.10, 0.10, 0.10, 0.05, 0.05, 0.10, 0.10, 0.10], dtype=np.float32
+        )
 
         # Actuators
         self.nu = self.model.nu
@@ -214,6 +231,31 @@ class MicroduckEnv(gym.Env):
         self.right_air_time = 0.0
         self.prev_left_contact = True
         self.prev_right_contact = True
+
+        # Restore nominal physics parameters before applying non-accumulating DR
+        self.model.body_ipos[:] = self.nominal_body_ipos
+        self.model.geom_friction[:] = self.nominal_geom_friction
+        self.joint_qpos_bias[:] = 0.0
+
+        if self.domain_randomization:
+            # Official non-accumulating CoM randomization (capped well within ±15mm trunk / ±10mm head)
+            if self.trunk_body_id != -1:
+                self.model.body_ipos[self.trunk_body_id] = (
+                    self.nominal_body_ipos[self.trunk_body_id]
+                    + self.np_random.uniform(-0.008, 0.008, size=3)
+                )
+            if self.head_body_id != -1:
+                self.model.body_ipos[self.head_body_id] = (
+                    self.nominal_body_ipos[self.head_body_id]
+                    + self.np_random.uniform(-0.005, 0.005, size=3)
+                )
+            # Foot friction randomization in (0.75, 1.25)
+            fric_scale = float(self.np_random.uniform(0.75, 1.25))
+            for gid in (self.left_foot_geom_id, self.right_foot_geom_id, self.floor_geom_id):
+                if gid != -1:
+                    self.model.geom_friction[gid, 0] = self.nominal_geom_friction[gid, 0] * fric_scale
+            # Joint encoder calibration bias (±0.008 rad)
+            self.joint_qpos_bias[:] = self.np_random.uniform(-0.008, 0.008, size=14).astype(np.float32)
 
         if self.duck_mimic_mode:
             self.commands[7] = 0.0  # sin(0) = 0.0
@@ -314,12 +356,12 @@ class MicroduckEnv(gym.Env):
         if self.resample_commands and (self.current_step % int(self.resample_interval / self.dt) == 0):
             self._sample_commands()
 
-        # Compute observation
+        # Compute observation ONCE per step (high-throughput fast path)
         obs = self._get_obs()
 
-        # Compute rewards and termination
-        reward, reward_info = self._compute_reward(action)
-        terminated = self._is_terminated()
+        # Compute rewards and termination (reusing precomputed obs)
+        terminated = self._is_terminated(obs)
+        reward, reward_info = self._compute_reward(action, obs, terminated)
         truncated = self.current_step >= self.max_episode_steps
 
         # Store last action
@@ -337,27 +379,19 @@ class MicroduckEnv(gym.Env):
         """Construct the 61-D observation vector."""
         obs = np.zeros(61, dtype=np.float32)
 
-        # 1. Base angular velocity (gyro) in trunk frame [3]
+        # 1 & 2. Base angular velocity (gyro) and Projected gravity in trunk frame [6]
         if self.imu_site_id != -1:
             site_mat = self.data.site_xmat[self.imu_site_id].reshape(3, 3)
-            # Sensor angular velocity or body angvel rotated to site frame
             world_angvel = self.data.qvel[3:6]
-            gyro_trunk = site_mat.T @ world_angvel
-            obs[0:3] = gyro_trunk
+            obs[0:3] = site_mat.T @ world_angvel
+            obs[3:6] = site_mat.T @ np.array([0.0, 0.0, -1.0])
         else:
             obs[0:3] = self.data.qvel[3:6]
-
-        # 2. Projected gravity in trunk frame [3]
-        if self.imu_site_id != -1:
-            site_mat = self.data.site_xmat[self.imu_site_id].reshape(3, 3)
-            proj_gravity = site_mat.T @ np.array([0.0, 0.0, -1.0])
-            obs[3:6] = proj_gravity
-        else:
             obs[3:6] = np.array([0.0, 0.0, -1.0])
 
-        # 3. Joint positions relative to default standing pose [14]
+        # 3. Joint positions relative to default standing pose [14] (+ optional encoder bias)
         current_joint_pos = self.data.qpos[7:21]
-        obs[6:20] = current_joint_pos - DEFAULT_JOINT_POS
+        obs[6:20] = (current_joint_pos - DEFAULT_JOINT_POS) + self.joint_qpos_bias
 
         # 4. Joint velocities [14]
         current_joint_vel = self.data.qvel[6:20]
@@ -371,8 +405,18 @@ class MicroduckEnv(gym.Env):
 
         return obs
 
-    def _compute_reward(self, action: np.ndarray) -> Tuple[float, Dict[str, float]]:
-        """Compute composite RL locomotion reward."""
+    def _compute_reward(
+        self,
+        action: np.ndarray,
+        obs: Optional[np.ndarray] = None,
+        terminated: Optional[bool] = None,
+    ) -> Tuple[float, Dict[str, float]]:
+        """Compute composite RL locomotion reward synced with pollen-robotics/microduck_rl v8."""
+        if obs is None:
+            obs = self._get_obs()
+        if terminated is None:
+            terminated = self._is_terminated(obs)
+
         # Current base linear and angular velocities in base frame
         trunk_mat = self.data.xmat[self.trunk_body_id].reshape(3, 3)
         lin_vel_world = self.data.qvel[:3]
@@ -386,7 +430,7 @@ class MicroduckEnv(gym.Env):
 
         # 1. Forward velocity tracking reward (sharp Gaussian centered at command)
         lin_vel_err = np.sum(np.square(lin_vel_trunk[:2] - np.array([cmd_vx, cmd_vy])))
-        rew_lin_vel = np.exp(-lin_vel_err / 0.03)
+        rew_lin_vel = float(np.exp(-lin_vel_err / 0.03))
 
         # 2. Direct forward progress reward and moderate backward motion penalty
         cost_backward_motion = 0.0
@@ -394,30 +438,31 @@ class MicroduckEnv(gym.Env):
         rew_progress = 0.0
         if cmd_vx > 0.03:
             if lin_vel_trunk[0] < 0.0:
-                cost_backward_motion = -6.0 * float(abs(lin_vel_trunk[0]))  # Penalty for moving backwards
+                cost_backward_motion = -4.0 * float(abs(lin_vel_trunk[0]))
             elif lin_vel_trunk[0] < 0.01:
-                cost_stand_still = -1.5  # Gentle incentive to initiate motion
+                cost_stand_still = -0.8
             else:
-                rew_progress = 4.0 * float(np.clip(lin_vel_trunk[0], 0.0, cmd_vx * 1.5))
+                rew_progress = float(np.clip(lin_vel_trunk[0] / max(cmd_vx, 0.05), 0.0, 1.25))
         elif cmd_vx < -0.03:
-            rew_progress = -4.0 * float(np.clip(lin_vel_trunk[0], cmd_vx * 1.5, 0.0))
+            rew_progress = float(np.clip(lin_vel_trunk[0] / min(cmd_vx, -0.05), 0.0, 1.25))
 
         # Unwanted excessive lateral drift penalty (permits natural duck waddle sway <= 0.08 m/s)
         lateral_err = abs(lin_vel_trunk[1] - cmd_vy)
         cost_lateral_vel = 0.0
         if lateral_err > 0.08:
-            cost_lateral_vel = -4.0 * float(lateral_err - 0.08)**2
+            cost_lateral_vel = -3.0 * float(lateral_err - 0.08)**2
 
-        # 3. Angular velocity (yaw) tracking reward
-        ang_vel_err = np.square(ang_vel_trunk[2] - cmd_omega)
-        rew_ang_vel = np.exp(-ang_vel_err / 0.20)
+        # 3. Official microduck_rl v8 Angular Velocity + Fine Yaw Tracking (eliminates yaw dead-zone!)
+        ang_vel_err = float(np.square(ang_vel_trunk[2] - cmd_omega))
+        rew_ang_vel = float(np.exp(-ang_vel_err / 0.50))       # Official std^2 = 0.50
+        rew_yaw_fine = float(np.exp(-ang_vel_err / 0.1225))    # Official v8 std = 0.35 (std^2 = 0.1225)
 
         # 4. Foot positions, contacts, and Biomimetic Duck Gait CPG
-        obs = self._get_obs()
-        proj_grav_x = obs[3]  # Pitch (forward/back tilt)
-        proj_grav_y = obs[4]  # Roll (lateral tilt)
-        proj_grav_z = obs[5]  # Vertical axis
+        proj_grav_x = float(obs[3])  # Pitch (forward/back tilt)
+        proj_grav_y = float(obs[4])  # Roll (lateral tilt)
+        proj_grav_z = float(obs[5])  # Vertical axis (~ -1.0 when upright)
         joint_pos = self.data.qpos[7:21]
+        is_upright = (proj_grav_z < -0.766)  # Official upright gate: tilt < 40 deg
 
         lf_z = float(self.data.site_xpos[self.left_foot_site_id][2])
         rf_z = float(self.data.site_xpos[self.right_foot_site_id][2])
@@ -434,7 +479,7 @@ class MicroduckEnv(gym.Env):
 
         rew_pitch = float(np.exp(-np.square(proj_grav_x) / 0.012))
 
-        # --- Biomimetic Duck Gait Motion Components ---
+        # --- Biomimetic Duck Gait Motion Components (normalized in [0, 1]) ---
         rew_duck_waddle = 0.0
         rew_duck_head_bob = 0.0
         rew_duck_crouch = 0.0
@@ -447,90 +492,85 @@ class MicroduckEnv(gym.Env):
         if self.duck_mimic_mode and abs(cmd_vx) > 0.02:
             phi = self.gait_phase
             # 5a. CPG Harmonic Duck Waddle:
-            # phi in [0, pi): left foot stance, right foot swing -> body rolls left (+proj_grav_y ~ +0.075)
-            # phi in [pi, 2pi): right foot stance, left foot swing -> body rolls right (-proj_grav_y ~ -0.075)
             waddle_target = self.duck_waddle_amp * float(np.sin(phi))
             waddle_vel_target = self.duck_waddle_amp * 2.0 * np.pi * self.duck_f_gait * float(np.cos(phi))
-            rew_duck_waddle = 2.5 * float(np.exp(-np.square(proj_grav_y - waddle_target) / 0.0035))
+            rew_duck_waddle = float(np.exp(-np.square(proj_grav_y - waddle_target) / 0.0045))
 
-            # Roll rate tracking matching CPG cadence (allows waddle velocity without flat penalty)
-            cost_roll_rate = -0.04 * float(np.square(ang_vel_trunk[0] - waddle_vel_target))
+            # Roll rate tracking matching CPG cadence
+            cost_roll_rate = -0.03 * float(np.square(ang_vel_trunk[0] - waddle_vel_target))
 
             # Allow natural waddle sway (|gy| <= 0.16 rad ~ 9.2 deg) without harsh penalty
             if abs(proj_grav_y) > 0.16:
-                cost_roll_lean = -10.0 * float(abs(proj_grav_y) - 0.16)
+                cost_roll_lean = -6.0 * float(abs(proj_grav_y) - 0.16)
             rew_roll = float(np.exp(-np.square(proj_grav_y - waddle_target) / 0.010))
 
-            # 5b. Webbed-Foot Stepping & Ground Clearance
+            # 5b. Webbed-Foot Stepping & Ground Clearance (target 0.02 m = 2 cm per official recipe)
             if phi < np.pi:  # Right Swing, Left Stance
-                swing_clearance = float(np.clip(rf_z / 0.016, 0.0, 1.2)) if not right_contact else 0.2
+                swing_clearance = float(np.clip(rf_z / 0.020, 0.0, 1.0)) if not right_contact else 0.15
                 stance_solid = 1.0 if left_contact else 0.0
             else:            # Left Swing, Right Stance
-                swing_clearance = float(np.clip(lf_z / 0.016, 0.0, 1.2)) if not left_contact else 0.2
+                swing_clearance = float(np.clip(lf_z / 0.020, 0.0, 1.0)) if not left_contact else 0.15
                 stance_solid = 1.0 if right_contact else 0.0
-            rew_stepping = 1.5 * swing_clearance + 1.0 * stance_solid
+            rew_stepping = 0.6 * swing_clearance + 0.4 * stance_solid
 
             # 5c. Rhythmic Head Bobbing (dual-frequency 2*phi: nods once per footstep)
             head_bob_target = 0.18 + self.duck_head_bob_amp * float(np.cos(2.0 * phi))
             actual_head_pitch = float(joint_pos[5] + joint_pos[6])
-            rew_duck_head_bob = 1.8 * float(np.exp(-np.square(actual_head_pitch - head_bob_target) / 0.010))
-            cost_head_wobble = -0.6 * float(joint_pos[7]**2 + joint_pos[8]**2)
+            rew_duck_head_bob = float(np.exp(-np.square(actual_head_pitch - head_bob_target) / 0.015))
+            cost_head_wobble = -0.3 * float(joint_pos[7]**2 + joint_pos[8]**2)
 
             # 5d. Duck Crouch: low Center of Mass and knee flexion
             trunk_z = float(self.data.qpos[2])
-            height_err = np.square(trunk_z - 0.110)
-            rew_height = 1.5 * float(np.exp(-height_err / 0.005))
+            height_err = np.square(trunk_z - 0.112)
+            rew_height = float(np.exp(-height_err / 0.005))
             cost_low_height = 0.0
             if trunk_z < 0.082:
-                cost_low_height = -15.0 * float(0.082 - trunk_z)
-            elif trunk_z > 0.122:
-                cost_low_height = -8.0 * float(trunk_z - 0.122)
+                cost_low_height = -10.0 * float(0.082 - trunk_z)
+            elif trunk_z > 0.125:
+                cost_low_height = -5.0 * float(trunk_z - 0.125)
 
             # Knee flexion & ankle synergy reward (maintains flat foot and upright CoM while crouched)
             left_pitch_err = (joint_pos[3] - DEFAULT_JOINT_POS[3]) + (joint_pos[4] - DEFAULT_JOINT_POS[4])
             right_pitch_err = (joint_pos[12] - DEFAULT_JOINT_POS[12]) + (joint_pos[13] - DEFAULT_JOINT_POS[13])
-            rew_foot_flat = 1.0 * float(np.exp(-np.square(left_pitch_err) / 0.015) * np.exp(-np.square(right_pitch_err) / 0.015))
+            rew_foot_flat = float(np.exp(-np.square(left_pitch_err) / 0.015) * np.exp(-np.square(right_pitch_err) / 0.015))
+            rew_duck_crouch = 0.5 * float(np.exp(-np.square(joint_pos[3] - 0.12) / 0.04) * np.exp(-np.square(joint_pos[12] + 0.12) / 0.04)) + 0.5 * rew_foot_flat
 
-            # Knee flexion reward (crouch walking stance)
-            rew_duck_crouch = 0.8 * float(np.exp(-np.square(joint_pos[3] - 0.12) / 0.04) * np.exp(-np.square(joint_pos[12] + 0.12) / 0.04)) + rew_foot_flat
-
-            # 5e. Outward Webbed-Foot Stance (Toe-out / 外八字)
-            rew_toe_out = 0.5 * float(np.exp(-np.square(joint_pos[0] - 0.035) / 0.02) * np.exp(-np.square(joint_pos[9] + 0.035) / 0.02))
+            # 5e. Outward Webbed-Foot Stance
+            rew_toe_out = float(np.exp(-np.square(joint_pos[0] - 0.035) / 0.02) * np.exp(-np.square(joint_pos[9] + 0.035) / 0.02))
         else:
             rew_roll = float(np.exp(-np.square(proj_grav_y) / 0.012))
             if abs(proj_grav_y) > 0.08:
-                cost_roll_lean = -8.0 * float(abs(proj_grav_y) - 0.08)
-            cost_roll_rate = -0.10 * float(np.square(ang_vel_trunk[0]))
+                cost_roll_lean = -6.0 * float(abs(proj_grav_y) - 0.08)
+            cost_roll_rate = -0.08 * float(np.square(ang_vel_trunk[0]))
             rew_stepping = 0.5 if (left_contact and right_contact) else 0.0
             trunk_z = float(self.data.qpos[2])
-            height_err = np.square(trunk_z - 0.12)
+            height_err = np.square(trunk_z - 0.116)  # Official nominal_z = 0.116m
             rew_height = float(np.exp(-height_err / 0.005))
-            cost_low_height = -15.0 * float(0.112 - trunk_z) if trunk_z < 0.112 else 0.0
+            cost_low_height = -10.0 * float(0.105 - trunk_z) if trunk_z < 0.105 else 0.0
 
-        # --- Upstream Pollen RL Improvements ---
-        # 1. Upstream Air-Time Window [0.125, 0.300]s (weight 3.0)
+        # --- Official Upstream Pollen RL v8 Components (Fixed: No Double-Multiplication!) ---
+        # 1. Official Air-Time Window [0.125, 0.300]s (normalized base 1.0, gated on upright tilt < 40 deg)
         rew_air_time = 0.0
         if not left_contact:
             self.left_air_time += self.dt
         else:
             if not self.prev_left_contact:  # Touchdown event
-                if 0.125 <= self.left_air_time <= 0.300 and abs(cmd_vx) > 0.02:
-                    rew_air_time += 3.0
+                if 0.125 <= self.left_air_time <= 0.300 and abs(cmd_vx) > 0.02 and is_upright:
+                    rew_air_time += 1.0
                 self.left_air_time = 0.0
 
         if not right_contact:
             self.right_air_time += self.dt
         else:
             if not self.prev_right_contact:  # Touchdown event
-                if 0.125 <= self.right_air_time <= 0.300 and abs(cmd_vx) > 0.02:
-                    rew_air_time += 3.0
+                if 0.125 <= self.right_air_time <= 0.300 and abs(cmd_vx) > 0.02 and is_upright:
+                    rew_air_time += 1.0
                 self.right_air_time = 0.0
 
         self.prev_left_contact = left_contact
         self.prev_right_contact = right_contact
 
-        # 2. Upstream 1.0s EMA Head-Pose Bias Penalty
-        # Charges DC head sag (~15 deg droop) while allowing dynamic stepping oscillations and duck bobbing
+        # 2. Official 1.0s EMA Head-Pose Bias Penalty (gated on upright & trunk_z > 0.09m)
         neck_head_indices = [5, 6, 7, 8]  # neck_pitch, head_pitch, head_yaw, head_roll
         neck_head_pos = joint_pos[neck_head_indices]
         neck_head_default = DEFAULT_JOINT_POS[neck_head_indices]
@@ -538,102 +578,112 @@ class MicroduckEnv(gym.Env):
         head_err = (neck_head_pos - neck_head_default) - neck_head_cmd
         alpha_ema = min(1.0, float(self.dt) / 1.0)
         self.head_bias_ema = (1.0 - alpha_ema) * self.head_bias_ema + alpha_ema * head_err
-        cost_head_bias = -0.5 * float(np.mean(np.abs(self.head_bias_ema)))
+        cost_head_bias = -0.6 * float(np.mean(np.abs(self.head_bias_ema))) if (is_upright and trunk_z > 0.09) else 0.0
 
-        # 3. Upstream Foot Clearance Target (0.02 m / 2 cm)
+        # 3. Official Foot Clearance Target (0.02 m / 2 cm) & Foot Slip (-0.1)
         cost_foot_clearance = 0.0
-        if not left_contact and lf_z < 0.010 and abs(cmd_vx) > 0.02:
-            cost_foot_clearance -= 0.6 * float(0.010 - lf_z) / 0.010
-        if not right_contact and rf_z < 0.010 and abs(cmd_vx) > 0.02:
-            cost_foot_clearance -= 0.6 * float(0.010 - rf_z) / 0.010
+        if not left_contact and lf_z < 0.020 and abs(cmd_vx) > 0.02:
+            cost_foot_clearance -= 0.5 * float(0.020 - lf_z) / 0.020
+        if not right_contact and rf_z < 0.020 and abs(cmd_vx) > 0.02:
+            cost_foot_clearance -= 0.5 * float(0.020 - rf_z) / 0.020
 
-        # 4. Upstream Upright Stance Reward (calibrated std^2 = 0.05, std ~ 0.224 rad)
+        # 4. Official Upright Stance Reward (normalized base in [0, 1], std^2 = 0.05)
         tilt_sq = float(np.square(proj_grav_x) + np.square(proj_grav_y))
-        rew_upright = 2.0 * float(np.exp(-tilt_sq / 0.05))
+        rew_upright = float(np.exp(-tilt_sq / 0.05))
 
-        # Direct penalty for excessive forward/backward leaning (allows dynamic pitch excursion during waddle)
+        # 5. Official Exponential Leg-Only Pose Reward (tight hip_roll std = 0.05 stops leg splay!)
+        leg_stds = self.leg_std_walking if abs(cmd_vx) > 0.02 else self.leg_std_standing
+        leg_q_err = (joint_pos[self.leg_joint_indices] - DEFAULT_JOINT_POS[self.leg_joint_indices]) / leg_stds
+        rew_pose = float(np.exp(-np.mean(np.square(leg_q_err))))
+
+        # Direct penalty for excessive forward/backward leaning
         cost_forward_lean = 0.0
         if proj_grav_x < -0.26:  # Forward tilt > ~15.0 deg
-            cost_forward_lean = -4.0 * float(-proj_grav_x - 0.26)
+            cost_forward_lean = -3.0 * float(-proj_grav_x - 0.26)
 
         cost_backward_lean = 0.0
         if proj_grav_x > 0.20:   # Backward tilt > ~11.5 deg
-            cost_backward_lean = -4.0 * float(proj_grav_x - 0.20)
+            cost_backward_lean = -3.0 * float(proj_grav_x - 0.20)
 
         # Overspeed penalty (prevents runaway acceleration sprinting)
         cost_overspeed = 0.0
         if cmd_vx > 0.03 and lin_vel_trunk[0] > cmd_vx + 0.08:
-            cost_overspeed = -12.0 * float(lin_vel_trunk[0] - (cmd_vx + 0.08))
+            cost_overspeed = -8.0 * float(lin_vel_trunk[0] - (cmd_vx + 0.08))
 
-        # 6. Active walking endurance bonus (rewards steady, controlled continuous strides)
-        trunk_z = float(self.data.qpos[2])
+        # 6. Active walking endurance bonus (normalized in [0, 1] for steady controlled strides)
         rew_endurance = 0.0
-        if (0.03 <= lin_vel_trunk[0] <= cmd_vx + 0.08) and abs(proj_grav_x) < 0.12 and abs(proj_grav_y) < 0.16 and trunk_z > 0.095:
-            rew_endurance = 3.5  # Steady controlled forward walking
+        if (0.03 <= lin_vel_trunk[0] <= cmd_vx + 0.08) and abs(proj_grav_x) < 0.14 and abs(proj_grav_y) < 0.16 and trunk_z > 0.095:
+            rew_endurance = 1.0
 
-        # 7. Joint pose regularization (relaxed on knees, ankles, neck to allow duck waddle & bobbing)
-        joint_weights = np.array([
-            0.3, 0.4, 0.5, 0.4, 0.6,   # left: yaw, roll, pitch, knee, ankle
-            0.1, 0.1, 0.3, 0.3,         # neck & head (pitch relaxed for bobbing)
-            0.3, 0.4, 0.5, 0.4, 0.6    # right: yaw, roll, pitch, knee, ankle
-        ], dtype=np.float32)
-        joint_err = np.square(joint_pos - DEFAULT_JOINT_POS)
-        drift_scale = 0.002 if abs(cmd_vx) > 0.02 else 0.02
-        cost_joint_drift = -drift_scale * float(np.sum(joint_weights * joint_err))
-
-        # 8. 20-Second Continuous Survival Milestone Ladder
+        # 7. Bounded Survival Milestone Bonus (kept well-scaled so Critic value_loss never explodes)
         if (trunk_z > 0.090 and abs(proj_grav_x) < 0.14 and abs(proj_grav_y) < 0.18 and 0.02 <= lin_vel_trunk[0] <= cmd_vx + 0.10):
             if self.current_step >= 1000:    # 20.0+ 秒突破！
-                rew_survival = 25.0
+                rew_survival = 2.0
             elif self.current_step >= 750:   # 15.0 ~ 20.0 秒
-                rew_survival = 15.0
+                rew_survival = 1.5
             elif self.current_step >= 500:   # 10.0 ~ 15.0 秒
-                rew_survival = 8.0
+                rew_survival = 1.0
             else:                            # 0.0 ~ 10.0 秒
-                rew_survival = 5.0
+                rew_survival = 0.5
         elif trunk_z > 0.085:
-            rew_survival = 1.0
+            rew_survival = 0.2
         else:
             rew_survival = 0.0
 
-        # 9. Smoothness & energy penalties (calibrated action diff matching upstream)
-        action_diff = np.sum(np.square(action - self.last_action))
-        cost_action_rate = -0.02 * action_diff
+        # 8. Smoothness & energy penalties (scaled by 0.1 when fallen per official microduck_rl)
+        action_diff = float(np.sum(np.square(action - self.last_action)))
+        action_rate_scale = 1.0 if is_upright else 0.1
+        cost_action_rate = -0.08 * action_rate_scale * action_diff
 
         torques = self.data.actuator_force[:14]
-        cost_energy = -0.0001 * np.sum(np.square(torques))
+        cost_energy = -0.0001 * float(np.sum(np.square(torques)))
 
         jnt_ranges = self.model.jnt_range[1:]
         viol_low = np.maximum(0.0, jnt_ranges[:, 0] - joint_pos)
         viol_high = np.maximum(0.0, joint_pos - jnt_ranges[:, 1])
-        cost_joint_limits = -5.0 * np.sum(viol_low + viol_high)
+        cost_joint_limits = -2.0 * float(np.sum(viol_low + viol_high))
 
-        # Pitch angular velocity damping (calibrated to allow dynamic swing without runaway tumbling)
-        cost_pitch_rate = -0.05 * float(np.square(ang_vel_trunk[1]))
-        cost_body_rates = -0.05 * float(np.square(ang_vel_trunk[2])) + cost_pitch_rate + cost_roll_rate
+        cost_termination = -4.0 if terminated else 0.0
+        cost_lin_vel_z = -1.5 * float(np.square(lin_vel_trunk[2]))
+        cost_ang_vel_xy = -0.05 * float(np.square(ang_vel_trunk[0]) + np.square(ang_vel_trunk[1]))
 
-        # PyTorch RL Tutorial standard tracking task reward weights
-        cost_termination = -4.0 if self._is_terminated() else 0.0
-        cost_lin_vel_z = -2.0 * float(np.square(lin_vel_trunk[2]))
-        
+        # Composite Total Reward (all official v8 + biomimetic terms properly connected & bounded!)
         total_reward = (
-            2.0 * rew_lin_vel          # tracking
-            + 2.0 * rew_progress       # progress
-            + 2.0 * rew_upright        # upright
-            + 3.0 * rew_air_time       # air_time
-            + 2.0 * cost_foot_clearance# swing_height (clearance)
-            + 3.0 * rew_stepping       # phase_contact
-            + 1.0 * rew_ang_vel        # yaw_rate
-            - 0.05 * float(np.square(ang_vel_trunk[0]) + np.square(ang_vel_trunk[1])) # ang_vel_xy
-            - 0.1 * action_diff        # action_rate
-            + cost_joint_drift         # pose
-            + cost_lin_vel_z           # lin_vel_z
-            + cost_termination         # termination
+            2.0 * rew_lin_vel           # Official linear velocity tracking (w=2.0)
+            + 1.5 * rew_progress        # Forward progress incentive
+            + 2.0 * rew_upright         # Official upright stance (w=2.0, fixed single multiply!)
+            + 1.5 * rew_pose            # Official leg-only anti-splay pose kernel (hip_roll std=0.05)
+            + 1.5 * rew_ang_vel         # Coarse angular velocity tracking
+            + 2.0 * rew_yaw_fine        # Official v8 fine yaw tracking (std=0.35, eliminates yaw drift!)
+            + 3.0 * rew_air_time        # Official air-time [0.125, 0.300]s (w=3.0, fixed single multiply!)
+            + 2.0 * rew_stepping        # Phase contact & swing clearance
+            + 1.0 * rew_duck_waddle     # Biomimetic CPG lateral waddle
+            + 0.8 * rew_duck_head_bob   # Biomimetic rhythmic head bobbing
+            + 0.6 * rew_duck_crouch     # Low CoM crouch & flat sole
+            + 1.2 * rew_endurance       # Steady speed endurance
+            + 1.0 * rew_survival        # Bounded survival milestone ladder
+            + cost_foot_clearance       # 2cm swing foot clearance penalty
+            + cost_head_bias            # Official 1.0s EMA head droop penalty
+            + cost_forward_lean         # Anti-tipping forward pitch guard
+            + cost_backward_lean        # Anti-tipping backward pitch guard
+            + cost_roll_lean            # Excessive roll guard
+            + cost_overspeed            # Anti-surging speed guard
+            + cost_backward_motion      # Anti-backward slip
+            + cost_stand_still          # Anti-freezing
+            + cost_lateral_vel          # Lateral drift guard
+            + cost_action_rate          # Smoothness (gated when fallen)
+            + cost_ang_vel_xy           # Roll/pitch rate damping
+            + cost_lin_vel_z            # Vertical bounce damping
+            + cost_joint_limits         # Soft joint limit penalty
+            + cost_energy               # Actuator torque efficiency
+            + cost_termination          # Fall termination penalty
         )
 
         reward_info = {
             "rew_lin_vel": float(rew_lin_vel),
             "rew_progress": float(rew_progress),
+            "rew_pose": float(rew_pose),
+            "rew_yaw_fine": float(rew_yaw_fine),
             "rew_stepping": float(rew_stepping),
             "rew_air_time": float(rew_air_time),
             "rew_endurance": float(rew_endurance),
@@ -655,26 +705,40 @@ class MicroduckEnv(gym.Env):
 
         return float(total_reward), reward_info
 
-    def _is_terminated(self) -> bool:
-        """Check fall or termination condition."""
-        trunk_z = self.data.qpos[2]
+    def _is_terminated(self, obs: Optional[np.ndarray] = None) -> bool:
+        """Check fall, NaN physics instability, or termination condition."""
+        # Official microduck_rl NaN/Inf physics state guard
+        if (
+            np.isnan(self.data.qpos).any()
+            or np.isnan(self.data.qvel).any()
+            or np.isinf(self.data.qpos).any()
+            or np.isinf(self.data.qvel).any()
+        ):
+            return True
+
+        trunk_z = float(self.data.qpos[2])
         # Ground impact termination: trunk drops below 0.058 m (nominal is ~0.11-0.12 m)
         if trunk_z < 0.058:
             return True
 
-        if self.imu_site_id != -1:
+        if obs is not None:
+            proj_gravity = obs[3:6]
+        elif self.imu_site_id != -1:
             site_mat = self.data.site_xmat[self.imu_site_id].reshape(3, 3)
             proj_gravity = site_mat.T @ np.array([0.0, 0.0, -1.0])
-            # Calibrated tilt limits: permits dynamic stepping pitch up to ~42 deg
-            # and roll waddle sway up to ~38 deg without false-positive cutoffs
-            if proj_gravity[0] < -0.67:  # Extreme forward pitch (> 42.0 deg)
-                return True
-            if proj_gravity[0] > 0.62:   # Extreme backward pitch (> 38.3 deg)
-                return True
-            if abs(proj_gravity[1]) > 0.62:  # Extreme lateral roll (> 38.3 deg)
-                return True
-            if proj_gravity[2] > -0.60:  # Overturned / upside down (> 53.1 deg total tilt)
-                return True
+        else:
+            return False
+
+        # Calibrated tilt limits: permits dynamic stepping pitch up to ~42 deg
+        # and roll waddle sway up to ~38 deg without false-positive cutoffs
+        if proj_gravity[0] < -0.67:  # Extreme forward pitch (> 42.0 deg)
+            return True
+        if proj_gravity[0] > 0.62:   # Extreme backward pitch (> 38.3 deg)
+            return True
+        if abs(proj_gravity[1]) > 0.62:  # Extreme lateral roll (> 38.3 deg)
+            return True
+        if proj_gravity[2] > -0.60:  # Overturned / upside down (> 53.1 deg total tilt)
+            return True
 
         return False
 

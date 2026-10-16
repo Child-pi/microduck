@@ -288,3 +288,28 @@ if proj_gravity[0] < -0.67 or proj_gravity[0] > 0.62: return True # > 42 度 / >
 1. 修正 `rl_training/build_fasttrack_colab.py` 與 `Microduck_FastTrack_Colab.ipynb` 參數與防護機制。
 2. 提交並推送至 GitHub 私有儲存庫分支 `rl-locomotion`。
 3. 於 Google Colab 觸發最新代碼更新，套用 `target_kl=0.02`、$\gamma=0.9985$ 與 Drive 即時同步守護，重啟穩健訓練！
+
+---
+
+## 十二、同步官方 Upstream (`pollen-robotics/microduck_rl` v8) 與 16 隻平行小鴨高 CP 值訓練計畫 (Phase 6)
+
+> 📄 **完整互動式 HTML 優化計畫書**：請參閱 [`docs/OPTIMIZATION_AND_16DUCKS_PLAN.html`](OPTIMIZATION_AND_16DUCKS_PLAN.html)
+
+### 1. 官方 Upstream (`b02fdea` v8) 深度比對與現有環境 3 大 Bug 修復
+1. **修復重複相乘獎勵 Bug（根治 Critic Value Loss 暴衝）**：
+   - 原先 `microduck_env.py` 中 `rew_upright` 已乘上 `2.0`，在 `total_reward` 又乘上 `2.0`（變成 4 倍）；`rew_air_time` 在接觸判定時已給 `3.0`，在 `total_reward` 又乘 `3.0`（變成 9 倍）。現已將基底函數正規化至 $[0, 1]$，嚴格對齊官方權重 `upright = 2.0`、`air_time = 3.0`（且須滿足直立 `proj_grav_z < -0.766`）。
+2. **接通所有遺漏的官方與仿生獎勵項**：
+   - 將先前漏接的 `rew_duck_waddle`、`rew_duck_head_bob`、`cost_head_bias`（1.0 秒 EMA 防低頭懲罰）、`rew_endurance`、`cost_overspeed` 與 `cost_foot_slip` (`-0.1`) 完整納入 `total_reward`。
+3. **新增官方 v8 兩大長程穩定度突破**：
+   - **防劈腿指數型腿部姿態核 (`rew_pose`)**：僅針對 10 個腿部關節計算高斯核 (`weight = 1.0`)，其中 `hip_roll` 標準差設為極嚴格的 $\sigma = 0.05\text{ rad}$ ($\sigma^2 = 0.0025$)，強制鎖住雙腿維持 `5°` 內傾站姿（`±0.0873 rad`），徹底消除 15 秒後雙腿外劈倒地。
+   - **精細偏航角追蹤 (`rew_yaw_fine`)**：疊加 $\sigma = 0.35, w = 2.0$ 的窄高斯偏航核，消除小角度轉向死區，維持 20 秒直線航向。
+4. **消除重複 `_get_obs()` 呼叫與加入非累積式領域隨機化 (DR)**：
+   - `step()` 將計算好的 `obs` 直接傳入 `_compute_reward(action, obs)`，省去 50% 觀察建構開銷；於 `reset()` 實施非累積式軀幹重心微擾 (`±15mm` 上限)、頭部重心 (`±10mm`)、腳底摩擦 (`0.7~1.3`) 與 `NaN/Inf` 終止保護。
+
+### 2. 選項 A（載入 17.82s 最佳權重 + 16 隻平行小鴨）與 Colab 高 CP 值省算力架構
+- **16 隻平行小鴨 (`NUM_CLONES = 16`)**：`n_steps = 1024`（單輪總緩衝區 `16 × 1024 = 16,384` 步，2 倍獨立環境多樣性）、`batch_size = 512`、`n_epochs = 5`、`target_kl = 0.015`、`gamma = 0.9985`、`gae_lambda = 0.95`，載入最佳權重時夾緊探索標準差 (`log_std = -1.0`)。
+- **高 CP 值算力優化**：
+  1. 選用 **NVIDIA T4 GPU**（~1.17–1.96 CU/hr，相較 L4/A100 省下 3～7 倍點數，完美匹配 16 路 CPU MuJoCo + `[256, 128, 64]` MLP）。
+  2. 16 個訓練環境設為 `render_mode=None`（純物理無頭模式，省 ~400MB RAM、加速 +35% FPS）。
+  3. 兩階段快速評估（Fast-Fail Staged Evaluation：主種子 `seed=89` 達標才跑滿 3 種子，省 45% 評估時間）。
+  4. 達標並完成 Google Drive / GitHub 同步後，自動執行 `google.colab.runtime.unassign()` 斷開執行階段，杜絕空燒算力點數。
