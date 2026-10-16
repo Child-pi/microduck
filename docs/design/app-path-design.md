@@ -9,6 +9,8 @@ contract. This covers the two services that landed together, because **they are 
 every decision in one constrains the other: `btd` owns nothing, so `configd` exists; `configd`
 serves a PIN, so `btd` can pair; a method routed in `btd` is a method `configd` must answer.
 
+The robot side, that is. The phone at the other end of it is [`mobile-app.md`](mobile-app.md).
+
 Sections marked **measured** were established on a Radxa Zero 3W rather than reasoned about.
 
 **The path works end to end on hardware** (2026-08-05): a Mac discovered the robot, bonded,
@@ -420,6 +422,98 @@ Three changes, none of them a real solution, because the model has no readiness 
 What would solve it properly is the IO model's `sendable()`, and that stays out of reach: it serves
 only the `Acquire*` fd paths, which a CoreBluetooth central does not drive.
 
+**A phone negotiates 515, and that changes the size of the problem**  · **measured** (2026-09-15).
+Everything above was measured from a Mac. An iPhone 17 on iOS 26.6.2, through `tauri-plugin-blec`,
+reports an ATT MTU of **515** — CoreBluetooth's `maximumWriteValueLength` of 512 plus the three-byte
+header, which is the same arithmetic this daemon undoes to get its payload. So `btd` sizes a
+notification at **512 bytes rather than 20**, from the session's first inbound write onward.
+
+Applied to the two rows above: the ~5 KiB journal tail that took ≈265 notifications and 1.83 s
+becomes about eleven of them, and the ~7 KiB reply that tore the notification session down at ≈350
+becomes about fourteen. The tear-down is not fixed by this — the three changes above are still what
+stands between us and it — but the queue pressure that produced it came from firing hundreds of
+chunks at a link that could not say when it was ready, and a phone does not get near that. It is the
+difference between `system.logs` being a call an app may offer and one it may not.
+
+### 3.7 A robot serving one central is still findable  · **measured** (2026-09-21)
+
+A robot with the phone app connected disappeared from `duckctl scan` completely — not listed under
+another name, not listed without its services, absent. So the one command that answers "where do I
+ssh?" answered nothing for as long as someone was using the app, and the advice in the tool's own
+failure text was to go and disconnect the other client.
+
+Two mechanisms stack, and only the first is obvious:
+
+- A connection **stops the advertising set that produced it**. That is the spec, and nothing in
+  BlueZ or the kernel puts it back until the link drops.
+- Linux will not **enable a connectable set at all** while a peripheral-role connection is open,
+  unless the controller says it can. `is_advertising_allowed` in `net/bluetooth/hci_sync.c` reads
+  the controller's LE Supported States: non-connectable while connected as a peripheral needs state
+  20, connectable needs 38 and 21.
+
+Measured on the board (AIC8800, HCI 5.4), with the phone's connection sampled once a second from
+the robot so the window is not guesswork:
+
+| registered while the phone was connected | reached the air? |
+|---|---|
+| non-connectable, carrying the duck service UUID | **yes** — found by a laptop scan 8 s later |
+| connectable, same payload | no — BlueZ registered it, a scan never saw it |
+
+`hciconfig hci0 lestates` confirms states 20 and 21 on this controller; it does not decode as far as
+38, and the table above is what says 38 is absent.
+
+**So `btd` advertises a broadcast while a session is live, and a peripheral otherwise.** The payload
+does not change — same name, same service UUID, same four bytes of IPv4 — so a scan finds the robot,
+and `duckctl ip`, `ssh`, `scp` and `open` all work while the app holds the link, none of which needs
+the radio beyond the listing.
+
+That is the true statement as well as the only broadcastable one. `bluer` keeps one notification
+state per characteristic (§3.2), so a second central does not get a second session, it *replaces*
+the first — a connectable advertisement was inviting something this daemon cannot honour, and the
+client that accepted the invitation broke the session someone else was using.
+
+Two things this does not do. The address **changes**: the kernel requires privacy on a
+non-connectable set and gives it a non-resolvable private address, so a busy robot is a different
+peripheral identity to a scanner, matched by name and service UUID rather than by address. And a
+central that unsubscribes without disconnecting leaves `btd` registering a connectable advertisement
+the kernel will not enable — BlueZ accepts the registration either way — which is the old behaviour
+until the link drops, and self-heals when it does.
+
+### 3.8 A Linux laptop connects through a second, extended advertisement  · **measured** (2026-10-01)
+
+`duckctl` on a Linux laptop (Intel BE200, BlueZ 5.64) found the robot and failed to connect every
+time — `le-connection-abort-by-local` on every attempt — while a Mac next to it connected first try. No bond
+on either side, nothing else holding the robot, and `btd`'s journal silent.
+
+HCI captures at both ends of the same attempts:
+
+| central | central hops with | robot hops with | result |
+|---|---|---|---|
+| Linux laptop, Intel BE200 | CSA #1 | **CSA #2** | `0x3e` Connection Failed to be Established, both ends, within 200 ms |
+| Mac | CSA #1 | CSA #1 | connects |
+
+Channel selection algorithm #2 is used only when **both** the advertisement and the connect request
+offer it. The laptop's controller supports #2 and still chose #1, so the robot's legacy advertisement
+does not offer it — and the AIC8800 hops with #2 anyway whenever the central offers it. The two ends
+then listen on different channels, lose each other, and give up below either host. Connection
+parameters are not it: a 2000 ms supervision timeout failed the same way.
+
+A connection made from an **extended** advertisement uses #2 at both ends by the spec, so the
+controller's choice is the right one there. Measured: the same laptop connected to an extended
+advertisement registered by hand, both ends on #2, discovered the duck service, and `duckctl info`
+answered.
+
+**So `btd` advertises twice while it is free to take a connection**: the legacy advertisement as
+before, which every central can scan, and an extended twin with the same payload, which is what a
+Linux laptop connects through. A busy robot drops the twin, since nothing connects through either.
+The twin's address field carries one more byte, `duck_ble::adv::EXTENDED_MARK`, because the two
+advertisements come from different random addresses and would otherwise be two robots with one
+name, which `duckctl` refuses as a collision. `duckctl` pairs them on name and address, keeps the
+twin, and waits up to a second for it once the legacy one has arrived.
+
+Not yet established: whether the Mac and the phone app see the extended advertisement, and which
+they connect through if they do. Either way they still have the legacy one.
+
 ## 5. Pairing: just-works, and a PIN the transport checks
 
 A six-digit PIN, stored by `configd`, checked by `btd` before it serves anything. **Not** by the
@@ -528,6 +622,55 @@ that removed it.
 This must be closed — the flag flipped, and defaulted on — before anything is handed to anyone. A robot whose provisioning secret is readable by a
 bystander is not a robot you can hand to a stranger.
 
+#### iOS is not macOS, and that is all that was established  · **measured** (2026-09-14)
+
+A short A/B on olducky, phone against board, `btd` restarted between runs through a systemd drop-in
+so the unit's `SupplementaryGroups` were the real ones.
+
+With `--require-pairing` **off** — which is Reachy Mini's configuration exactly, see below — an
+iPhone connected and discovered the service without complaint. With it **on**, iOS put up its
+pairing prompt. That is the part worth recording: **CoreBluetooth on a phone begins SMP where
+CoreBluetooth on a laptop does not**, so the hang §5.5 measured is not a property of the stack in
+general, and "no bond is possible" is not what is happening.
+
+What was *not* established, because the run was stopped there: whether the encrypted read then
+completed, and what `bluetoothctl info` said about the bond. `version read` never appeared in the
+journal — but that line is `debug!` and the unit sets `RUST_LOG=info`, so its absence is not
+evidence either. Anyone picking this up starts by adding `Environment=RUST_LOG=debug` to the same
+drop-in, connecting, and tapping the read rather than the connect.
+
+#### The reference implementation does not use link-layer encryption at all
+
+Worth knowing before anyone spends another day on the flag. `reachy_mini`'s BLE provisioning service
+(`daemon/app/services/bluetooth/bluetooth_service.py`) declares its characteristics `["write"]` and
+`["read", "notify"]` — no encryption flag anywhere. It registers a `NoInputNoOutput` agent and sets
+`Pairable`, so a central *may* bond, but nothing ever requires it. That is why it works on iOS: the
+phone is never asked to encrypt anything.
+
+Their reasoning is ours, reached first and answered differently:
+
+> BLE pairing here is Just-Works (the robot is `NoInputNoOutput` hardware, so MITM-protected pairing
+> isn't possible) — so we encrypt at the application layer and mix the device PIN into the key
+> derivation.
+
+The same dead end `crate::pairing` documents. Where this page concluded *fix the link layer*, they
+concluded *stop asking the link layer for confidentiality and seal the one secret that matters*:
+`x25519-hkdf-sha256-aesgcm`, ephemeral ECDH against a rotating robot key, HKDF salted with the PIN,
+AES-256-GCM with the SSID as AAD. It defeats a passive sniffer and does not defeat an active MITM
+present during setup; they say so, and track a PAKE as follow-up.
+
+**So §8.1 has a third candidate fix, and one caveat that is ours alone.** The property that matters —
+a bystander cannot recover the owner's wifi passphrase — comes from the ephemeral ECDH, not from the
+PIN. The PIN-as-salt is what stops a wrong-PIN peer producing a decryptable blob, and at `000000` it
+buys nothing here. Their per-robot PIN is the serial's last five characters, printed on the robot,
+which works because *their* advertisement is anonymous — every robot advertises `ReachyMini`. Ours
+advertises a name derived from the serial (§8.2), so that particular trick is closed to us by a
+choice made for a better reason.
+
+**Deferred, deliberately, and not dismissed.** Nothing is shipped and nobody has been handed a
+robot, so the link stays open and `--require-pairing` stays off and stays the default. The gate is
+unchanged: this closes before a robot goes to anyone.
+
 ### 5.6 Open
 
 - **Bond revocation.** Nothing un-pairs a phone; `bluetoothctl untrust` is the manual escape. Needs
@@ -606,7 +749,7 @@ links libdbus built from vendored source by `zig cc`.
 
 `duckctl` (`cargo run -p duckctl`) is the phone's stand-in and the only way to exercise
 the radio. An **example, not a binary**, so `btleplug` never reaches the robot; `btleplug` rather
-than `bluer` because it must run on a developer's Mac. It reuses `btd::framing`, so the chunking is
+than `bluer` because it must run on a developer's Mac. It reuses `duck_ble::framing`, so the chunking is
 genuinely the client half of the robot's own code rather than a reimplementation free to agree with
 itself.
 
@@ -645,10 +788,21 @@ Ordered by what blocks what, not by size.
 
 §5.5 in full. The link is unencrypted **by default** — `--require-pairing` exists and is off, because
 requiring it makes every client hang — so the PIN and every wifi passphrase cross in clear. Closing
-this means making the secure configuration work *and* flipping the default; doing only the first
-leaves every board insecure. One fact decides the fix and is not yet known: whether a bond exists at all (`bluetoothctl info <mac>` on
-the robot). *Bonded but not encrypting* and *never bonded* need opposite repairs, and shipping the
-wrong one leaves the problem in place while looking solved.
+this means making the confidential configuration work *and* making it the default; doing only the
+first leaves every board insecure.
+
+Three candidate fixes now, where this section used to assume one:
+
+| | |
+|---|---|
+| **Fix the link layer** | What this page assumed. If it works, the whole routed surface is confidential rather than one field, and we write no crypto. Against it: the bond can only ever be just-works, so `encrypt_authenticated_write` is unreachable whatever else changes (§5.5) |
+| **Seal at the application layer** | Reachy Mini's answer, in production on both phone platforms and through App Review. Protects the passphrase against a passive sniffer with no bond at all. Against it: it protects only what someone remembers to seal, and this transport now carries a device code, journal lines and the PIN itself (§3.1) |
+| **Seal the session rather than the call** | The same crypto established once after `hello`, covering every frame after it. More work than the row above and the only one that covers `system.authenticate`, so a method added later cannot be the one nobody sealed |
+
+The fact that would decide the first row is still not known — whether a bond exists at all
+(`bluetoothctl info <mac>` on the robot). *Bonded but not encrypting* and *never bonded* need
+opposite repairs, and shipping the wrong one leaves the problem in place while looking solved. §5.5
+records how far the iPhone run got and where to resume it.
 
 ### 8.2 Telling robots apart — three people, three robots, one room  · **built**
 
@@ -662,11 +816,19 @@ one nobody can use, and that stands on its own. §8.1 is tracked separately and 
 
 #### What a robot is called
 
-**Identity comes from the SoC serial**, read from `/proc/device-tree/serial-number` and reported by
-`system.info` (`configd::identity`). Fused into the chip and handed over by the bootloader, so it
-survives a reflash, survives swapping the radio module, and needs no provisioning step to exist —
+**Identity comes from the SoC serial**, reported by `system.info` (`configd::identity`). Fused into
+the chip, so it survives a reflash, survives swapping the radio module, and needs no provisioning step to exist —
 which is what keeps a hand-flashed board working. It is also a plain file read: no root, no D-Bus,
 and available immediately rather than after the ~73 seconds `hci0` takes to appear.
+
+**Where it is read depends on the board** (`robotd_params::serial`). Rockchip's serial is a CRC of
+sixteen bytes of the SoC's OTP, computed twice: by U-Boot, into the device tree's `serial-number`,
+and by the kernel, into `/proc/cpuinfo`'s `Serial`. A zero3 reads the device tree, which is what
+every Zero 3W's name was made from. A beta reads `/proc/cpuinfo`: the beta image's U-Boot reads the
+OTP three bytes early (0x07, not 0x0a), stops just short of the per-chip bytes, and gives every chip
+in a lot the same serial — the first two beta boards were both `duck-d041`. The voice and the chorale
+id are seeded from the same value (`sounds::hardware_seed`), so they had collided too; and a beta
+whose kernel prints no `Serial` has no serial rather than the lot's.
 
 This is not a new idea in this repository, which is worth saying: `updater-design.md` §5.6 already
 picked the same value as the update log's stable device ID, for the same reason — it works and needs
@@ -688,7 +850,8 @@ the 128-bit service UUID (18) and the address field (8, see below) spend 29 of t
 advertisement holds. Before the address it was 21, and a name of 8 characters or fewer could have
 fitted alongside — `duck-c51b` is 9, one over, so in practice it never did. A scan response is a
 second exchange a central can miss on its own, which is why a device reported with no name and no
-services is a plausible robot rather than something to filter out.
+services is a plausible robot rather than something to filter out. It is also why `duckctl` keeps
+listening a few seconds past its deadline for a robot it has heard without a name (`NAME_GRACE`).
 
 #### The advertised name is the one the robot was given
 

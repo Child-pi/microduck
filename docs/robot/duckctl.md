@@ -14,7 +14,52 @@ below.
 
 ## Getting it
 
-Run it from a clone of this repo:
+On any machine with [`uv`](https://docs.astral.sh/uv/) — Linux, macOS or Windows:
+
+```bash
+uvx duckctl --name <robot-name> info
+```
+
+That runs the latest release, downloaded once and cached; nothing is compiled. To have a plain
+`duckctl` on the PATH instead, `uv tool install duckctl` (`uv tool upgrade duckctl` to move it on).
+It is the build of the latest `daemon-v*` release, so it can be behind `main`;
+[`ci-setup.md`](../project/ci-setup.md#duckctl-on-pypi) has how it is published.
+
+With Homebrew, on macOS or Linux:
+
+```bash
+brew install pierre-rouanet/tools/duckctl
+```
+
+`brew upgrade duckctl` moves it to each new release.
+
+For what a branch last built — `main` included — on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh
+```
+
+It installs what `main` last built to `~/.local/bin`. For another branch's build, name it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pollen-robotics/microduck/main/scripts/install-duckctl.sh | sh -s -- udp-pad
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/pollen-robotics/microduck/releases/download/daemon-dev-main/duckctl-windows-x86_64.zip -OutFile duckctl.zip
+```
+
+```powershell
+Expand-Archive duckctl.zip -DestinationPath .
+```
+
+Every branch push publishes these builds on the `daemon-dev-<branch>` prerelease, beside the daemon. A macOS binary
+downloaded in a browser rather than with the script is quarantined; clear it with
+`xattr -d com.apple.quarantine duckctl`.
+
+With a Rust toolchain, run it from a clone of this repo:
 
 ```bash
 cargo run -q -p duckctl -- --name <robot-name> info
@@ -25,6 +70,14 @@ Or install it once, at the cost of a snapshot that no longer follows the branch:
 ```bash
 cargo install --path duckctl
 ```
+
+Without a clone, the same from GitHub — `main`, or add `--branch <name>` for another:
+
+```bash
+cargo install --locked --git https://github.com/pollen-robotics/microduck duckctl
+```
+
+Building needs no system headers: libdbus is compiled in. Then:
 
 ```bash
 duckctl --name <robot-name> info
@@ -67,7 +120,7 @@ it, along with the signal and both addresses.
 For the address on its own:
 
 ```bash
-ssh radxa@$(duckctl ip)
+ssh microduck@$(duckctl ip)
 ```
 
 `ip` prints the address and nothing else, so it substitutes. It reads the advertisement, so it
@@ -87,7 +140,7 @@ duckctl ssh -- sudo robotctl pad pair
 `ssh` finds the address the way `ip` does and then becomes `ssh`, so the prompts, the terminal and
 the exit status are ssh's own. The account is `--user`, else `DUCK_BOARD_USER` from the environment
 — the variable [`dev-push.sh`](dev-push.md) reads, so a laptop set up for pushing is set up for this
-— else `radxa`. Words after `--` run on the robot instead of opening a shell.
+— else `microduck`. Words after `--` run on the robot instead of opening a shell.
 
 Files go the same way:
 
@@ -226,6 +279,13 @@ duckctl --name <robot-name> info
 Name, serial and uptime.
 
 ```bash
+duckctl --name <robot-name> quack
+```
+
+The robot quacks in its own voice — every voice is generated from the serial — so the duck that
+answers is the one the name reached. A muted robot refuses and says so rather than staying silent.
+
+```bash
 duckctl --name <robot-name> name <new-name>
 ```
 
@@ -272,6 +332,22 @@ duckctl --name <robot-name> health
 ```
 
 Whether the control loop is healthy.
+
+```bash
+duckctl --name <robot-name> reboot-motors
+```
+
+The way back from a servo in hardware error — overload, overheating, electrical shock — which
+otherwise holds torque off until the battery is pulled. `health` names the joint. Add ids to reboot
+only those:
+
+```bash
+duckctl --name <robot-name> reboot-motors 3 11
+```
+
+**Torque goes off on every joint first**, so hold the robot or have it lying down. It stays limp
+afterwards, with the gains restored on the next write — press Start on the pad, or
+`duckctl call robot.init`, to stand it back up.
 
 ```bash
 duckctl --name <robot-name> status
@@ -325,7 +401,7 @@ Which matters after an update, when forty lines carry two different builds' outp
 There is no `-f`, no `--since` and no search. For those, ssh in:
 
 ```bash
-ssh radxa@$(duckctl --name <robot-name> ip)
+ssh microduck@$(duckctl --name <robot-name> ip)
 ```
 
 ```bash
@@ -593,12 +669,24 @@ changes are visible without knowing the defaults, and `error`, for a button boun
 robot no longer has — the realistic way to get one of those is removing a skill, not mistyping.
 
 `""` switches a button off, which is a different wish from `pad reset` putting it back to what the
-robot ships with. Five buttons are bindable: `a`, `x`, `lb`, `rb`, `dpad_down` — and `lb`/`rb` are
+robot ships with. Six buttons are bindable: `a`, `b`, `x`, `y`, `lb`, `rb` — and `lb`/`rb` are
 the **bumpers**, since the analog triggers are the mouth and the quack.
 
 Pairing a pad is a different namespace and a different daemon — `pad.pair` and `pad.forget` are
 `configd`'s, reached with `call`. These two are `robotd`'s, because checking a skill name needs
 the list of skills.
+
+## A pad on this machine, over UDP
+
+```bash
+duckctl udp-pad
+```
+
+Sends the state of the gamepad a button is pressed on (or `--pad N`) to a duck whose
+`[netpad] enabled` is true. The address is found the way `ip` finds it, so `--name` picks the robot;
+give one instead (`duckctl udp-pad 192.168.1.42`) and no Bluetooth is involved at all. `--hz` (10 to 100, default 30) is the most it
+sends a second. One per duck drives several ducks from one laptop. It is a LAN tool, and
+[`udp-pad.md`](udp-pad.md) has the setup, several ducks, and the wire format.
 
 ## Anything else — `call`
 
@@ -649,15 +737,17 @@ watching, and `update status` afterwards says how it went.
 
 ## What is refused
 
-Teleop (`robot.move`, `robot.head`, `robot.enable`, `robot.stop`, `robot.init`, `robot.relax`),
-high-rate telemetry (`robot.subscribe`), the two update commands a person has to mean
-(`update.pin`, `update.resetToGolden`) and the pairing PIN (`system.pairingPin`,
-`system.setPairingPin`) are refused by `btd` itself and never reach a daemon.
+Teleop (`robot.move`, `robot.head`, `robot.look`, `robot.pose`, `robot.mouth`), the emergency stop
+(`robot.stop`), letting the joints go (`robot.relax`), high-rate telemetry (`robot.subscribe`), the
+two update commands a person has to mean (`update.pin`, `update.resetToGolden`) and the pairing PIN
+(`system.pairingPin`, `system.setPairingPin`) are refused by `btd` itself and never reach a daemon.
+They come back as error code 14, "not available over Bluetooth".
 
-`robot.do` is **not** in that list, though it moves the robot: teleop is a stream of fifty small
-updates a second, which is what a 20-byte notification budget cannot carry, and a skill is one
-request. They come back as
-error code 14, "not available over Bluetooth".
+`robot.do`, `robot.init`, `robot.enable` and `robot.rebootMotors` are **not** in that list, though
+all four move the robot: teleop is a stream of fifty small updates a second, which is what a
+20-byte notification budget cannot carry, and each of these is one request. `robot.relax` is the
+one that stays refused on grounds other than rate — its only outcome is a robot that was holding
+itself up and now is not.
 
 That is a security boundary rather than a missing feature, and each refusal has its reason next
 to it in `btd/src/route.rs` — [`app-path-design.md`](../design/app-path-design.md) §3.1 is the

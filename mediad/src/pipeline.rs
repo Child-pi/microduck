@@ -89,8 +89,13 @@
 //! naming the arity rather than as an abort.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
+// `bail!` belongs to the sensor-mode search, so it is gated with it rather than left to warn on a
+// build with no v4l2 to talk to.
+#[cfg(target_os = "linux")]
+use anyhow::bail;
 use duck_ipc_proto as proto;
 use gstreamer as gst;
 use gstreamer::prelude::*;
@@ -216,13 +221,29 @@ pub enum Source {
 /// these are for. From there [`crate::exposure`] meters the picture and takes over, because
 /// Rockchip's 3A engine converges once at stream start and then stops — and does not manage even
 /// that if it missed the stream-start event. With `--no-auto-exposure` these are all there is and
-/// the picture stays at one brightness. Values are in the sensor's own units: exposure in lines (~19 µs each)
-/// and analogue gain where 256 is 1x, up to 2816 for 11x.
+/// the picture stays at one brightness. Values are in the sensor's own units — exposure in lines,
+/// and analogue gain where [`Exposure::unity_gain`](crate::sensor::Exposure::unity_gain) is 1x — so
+/// `None` takes the found sensor's own starting point, which is the only default that means the
+/// same picture on every sensor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Camera {
     pub device: String,
-    pub exposure: u32,
-    pub analogue_gain: u32,
+    pub exposure: Option<u32>,
+    pub analogue_gain: Option<u32>,
+    /// The sensor this camera must be — the board's, unless `[media] sensor` forces one. A media
+    /// graph holding another is refused; [`crate::sensor`] says why.
+    pub expected: crate::sensor::Expected,
+}
+
+impl Camera {
+    /// The exposure and analogue gain the capture starts at, on this sensor.
+    pub fn starting(&self, sensor: &crate::sensor::Sensor) -> (u32, u32) {
+        (
+            self.exposure.unwrap_or(sensor.exposure.start_lines),
+            self.analogue_gain
+                .unwrap_or_else(|| sensor.exposure.start_gain()),
+        )
+    }
 }
 
 /// One raw frame off the tee, as the last one seen.
@@ -233,6 +254,10 @@ pub struct Frame {
     /// The GStreamer format name — [`CAPTURE_FORMAT`], carried rather than assumed so a consumer
     /// reading this cannot silently misinterpret the bytes if the capture format changes again.
     pub format: &'static str,
+    /// When this buffer was taken, for a consumer joining a frame to a separately sampled
+    /// robot state. Observation time, not a scheduling clock: it is never used to pace capture,
+    /// so an NTP step cannot reach the pipeline through it.
+    pub captured_at: SystemTime,
     /// Tightly packed as the caps describe it, in `format`.
     pub data: Vec<u8>,
 }
@@ -337,14 +362,19 @@ impl Frames {
 
     /// Whether a reader is waiting, taking the request if one is. The callback's whole cost on a
     /// frame nobody asked for.
-    fn take_request(&self) -> bool {
+    ///
+    /// `pub(crate)` so that [`crate::frame`]'s tests can stand in for the capture branch: the
+    /// endpoint's behaviour on a real delivery is only testable by driving this rendezvous.
+    pub(crate) fn take_request(&self) -> bool {
         self.0
             .wanted
             .swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Hand the captured frame to whoever is waiting for it.
-    fn deliver(&self, frame: Frame) {
+    ///
+    /// `pub(crate)` for the same reason as [`Frames::take_request`].
+    pub(crate) fn deliver(&self, frame: Frame) {
         let mut latest = self.0.latest.lock().expect("frame lock");
         latest.frame = Some(frame);
         latest.generation = latest.generation.wrapping_add(1);
@@ -363,7 +393,17 @@ pub struct Channel {
     pub outbound: mpsc::Sender<String>,
 }
 
-/// Build and start the pipeline. Returns it, plus a stream of control channels — one per peer.
+/// What [`start`] hands back, in the order it describes them.
+pub type Started = (
+    gst::Pipeline,
+    mpsc::Receiver<Channel>,
+    Frames,
+    Option<StreamBranch>,
+    Consumers,
+);
+
+/// Build and start the pipeline. Returns it, plus a stream of control channels — one per peer —
+/// and the live count of peers being encoded for.
 ///
 /// The pipeline is returned rather than kept here so the caller owns its lifetime: dropping it
 /// stops the session, which is what a shutdown should do.
@@ -372,12 +412,7 @@ pub fn start(
     producer: &crate::producer::Producer,
     settings: &Settings,
     relays: Arc<crate::turn::Relays>,
-) -> Result<(
-    gst::Pipeline,
-    mpsc::Receiver<Channel>,
-    Frames,
-    Option<StreamBranch>,
-)> {
+) -> Result<Started> {
     let &Settings {
         port,
         bitrate,
@@ -403,6 +438,8 @@ pub fn start(
     // never arriving — see [`bridge_gstreamer_log`].
     bridge_gstreamer_log();
 
+    prefer_a_usable_h264_encoder();
+
     // **A GStreamer signal handler runs on a GStreamer thread, which is not inside the tokio
     // runtime.** `tokio::spawn` there panics with "there is no reactor running", and a panic
     // crossing the C closure boundary is a non-unwinding abort — the whole daemon dies with
@@ -423,7 +460,18 @@ pub fn start(
             src.set_property("is-live", true);
             src
         }
+        #[cfg(target_os = "linux")]
         Source::Camera(camera) => camera_source(camera, fps)?,
+        // Not "unsupported": `[media] camera = true` off a robot is a config file copied from one,
+        // and the fix is to name whichever of the other two sources was meant.
+        #[cfg(not(target_os = "linux"))]
+        Source::Camera(_) => {
+            return Err(anyhow!(
+                "a head camera is captured with v4l2, which this is not running on. A duck in \
+                 MuJoCo is --sim-camera; a source that needs nothing at all is the default test \
+                 pattern"
+            ));
+        }
         Source::Sim(addr) => sim_source(addr, width, height, fps)?,
     };
 
@@ -715,7 +763,7 @@ pub fn start(
         fps,
         "signalling server listening"
     );
-    Ok((pipeline, channels_rx, frames, stream_branch))
+    Ok((pipeline, channels_rx, frames, stream_branch, consumers))
 }
 
 /// Build the valved H.264 branch: `queue ! valve ! videorate ! videoscale ! videoconvert ! enc !
@@ -1100,6 +1148,9 @@ fn wire_frames(appsink: &gst_app::AppSink, frames: Frames, width: u32, height: u
                     width,
                     height,
                     format: CAPTURE_FORMAT,
+                    // Taken here rather than at delivery: this is the moment the buffer existed,
+                    // and it costs one clock read on a frame someone already asked for.
+                    captured_at: SystemTime::now(),
                     data: map.as_slice().to_vec(),
                 });
 
@@ -1229,6 +1280,36 @@ fn watch_bus(pipeline: &gst::Pipeline) {
         );
 }
 
+/// Get `webrtcsink` off an encoder it cannot drive.
+///
+/// **A rank fix, because the choice is made by rank and on macOS it is a tie.** `webrtcsink` picks
+/// among the H.264 encoders by factory rank, and there `vtenc_h264`, `vtenc_h264_hw` and `x264enc`
+/// all register at `primary` — so the winner is registry order rather than a decision. VideoToolbox
+/// winning it is a broken stream and not a slow one: `webrtcsink` reports `Bitrate handling is not
+/// supported yet for vtenc_h264`, the encoder then fails to negotiate, and the discovery pass dies
+/// with `not-negotiated`. Software H.264 at 640x360 costs a fraction of a laptop core.
+///
+/// The board is untouched, deliberately: there the ranks are not a tie — `mpph264enc` registers at
+/// `primary+1` on purpose — and reaching into that would be changing the one arrangement that was
+/// measured.
+#[cfg(target_os = "macos")]
+fn prefer_a_usable_h264_encoder() {
+    use gst::prelude::*;
+
+    for name in ["vtenc_h264", "vtenc_h264_hw"] {
+        if let Some(factory) = gst::ElementFactory::find(name) {
+            factory.set_rank(gst::Rank::NONE);
+            tracing::info!(
+                encoder = name,
+                "demoted below x264enc: webrtcsink cannot set its bitrate"
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prefer_a_usable_h264_encoder() {}
+
 fn make(name: &str) -> Result<gst::Element> {
     gst::ElementFactory::make(name)
         .build()
@@ -1237,19 +1318,25 @@ fn make(name: &str) -> Result<gst::Element> {
 
 /// The head camera as a `v4l2src`, with the one adjustment this driver needs.
 ///
+/// This function, [`CAPTURE_BUFFERS`]/[`raise_capture_buffers`] and the two sensor-mode helpers
+/// below are the whole of what ties this file to Linux. Everything else here is GStreamer, which
+/// runs wherever it is installed.
+///
 /// `v4l2src` rather than a hand-written V4L2 loop. The case for our own capture was that this
 /// driver drops every third frame, and that raw bytes through `fdsrc` need
 /// `rawvideoparse blocksize=…`, which is silently wrong the moment stride padding appears. Both
 /// belong to the *subprocess* shape: `v4l2src` attaches a `GstVideoMeta` describing the real
 /// layout, and the frame loss has a cause with a small fix — see [`raise_capture_buffers`].
+#[cfg(target_os = "linux")]
 fn camera_source(camera: &Camera, fps: u32) -> Result<gst::Element> {
-    pin_sensor_mode(fps)?;
+    let sensor = pin_sensor_mode(camera.expected, fps)?;
+    let (exposure, analogue_gain) = camera.starting(sensor);
 
     // Exposure and gain go through `extra-controls` rather than a `v4l2-ctl` call, so they are
     // applied by whoever opens the device — including after a re-open we did not initiate.
     let controls = gst::Structure::builder("c")
-        .field("exposure", camera.exposure as i32)
-        .field("analogue_gain", camera.analogue_gain as i32)
+        .field("exposure", exposure as i32)
+        .field("analogue_gain", analogue_gain as i32)
         .build();
 
     let src = gst::ElementFactory::make("v4l2src")
@@ -1267,8 +1354,9 @@ fn camera_source(camera: &Camera, fps: u32) -> Result<gst::Element> {
 
     tracing::info!(
         device = %camera.device,
-        exposure = camera.exposure,
-        analogue_gain = camera.analogue_gain,
+        sensor = sensor.name(),
+        exposure,
+        analogue_gain,
         "head camera"
     );
     Ok(src)
@@ -1385,6 +1473,7 @@ pub const CAPTURE_FORMAT: &str = "UYVY";
 /// | seconds | 15.2 | 10.3 | 10.3 | 10.3 |
 ///
 /// 19.7 fps against 29.2 from a 30 fps sensor, and `v4l2src` lands on two.
+#[cfg(target_os = "linux")]
 const CAPTURE_BUFFERS: u32 = 4;
 
 /// Get `v4l2src` off two capture buffers, which costs a third of the frames.
@@ -1427,6 +1516,7 @@ const CAPTURE_BUFFERS: u32 = 4;
 /// encoder's zero on the way back. A pad probe fires in both directions, so this rewrites pool 0
 /// every time it sees the query and the last word is ours. That is the bug that made three
 /// earlier versions of this function look like they were being ignored.
+#[cfg(target_os = "linux")]
 fn raise_capture_buffers(src: &gst::Element) -> Result<()> {
     let pad = src
         .static_pad("src")
@@ -1496,70 +1586,115 @@ fn raise_capture_buffers(src: &gst::Element) -> Result<()> {
     Ok(())
 }
 
-/// Which sensor mode this process managed to put the camera in, once it has tried.
+/// The camera sensor this process found, and whether it took the pinned mode.
+#[derive(Debug, Clone, Copy)]
+pub struct Found {
+    pub sensor: &'static crate::sensor::Sensor,
+    /// Whether `media-ctl` put it in [`Sensor::mode`](crate::sensor::Sensor::mode). Without that,
+    /// how much of the sensor a frame covers is unknown, and so is the geometry.
+    pub pinned: bool,
+}
+
+/// Which sensor this process found and what mode it managed to put it in, once it has tried.
 ///
 /// A `OnceLock` rather than a value threaded up through the pipeline builder, because that is what
 /// it is: one fact about this process's camera, established while the pipeline is built and read
-/// afterwards by whatever answers `media.video`. `None` — never set, or set after a failed switch
-/// — means the geometry is unknown, and `crate::camera` publishes no intrinsics for it.
-static SENSOR_MODE: std::sync::OnceLock<Option<crate::camera::SensorMode>> =
-    std::sync::OnceLock::new();
+/// afterwards by the auto-exposure loop and by whatever answers `media.video`. `None` — never set —
+/// means there is no camera.
+static SENSOR: std::sync::OnceLock<Found> = std::sync::OnceLock::new();
 
-/// The sensor mode in force, or `None` when there is no camera or the switch did not take.
-pub fn sensor_mode() -> Option<crate::camera::SensorMode> {
-    *SENSOR_MODE.get().unwrap_or(&None)
+/// The sensor found, or `None` when there is no camera.
+pub fn sensor() -> Option<Found> {
+    SENSOR.get().copied()
 }
 
-/// Switch the IMX219 out of its boot mode, which caps capture at 21 fps.
+/// The sensor, when it is confirmed in its pinned mode — the only case a geometry is known for.
+pub fn pinned_sensor() -> Option<&'static crate::sensor::Sensor> {
+    sensor()
+        .filter(|found| found.pinned)
+        .map(|found| found.sensor)
+}
+
+/// Switch the sensor into the mode this daemon streams from.
 ///
-/// The sensor boots in 3280x2464 and the rkisp scaler will happily give us 1280x720 from it — at
+/// The IMX219 boots in 3280x2464 and the rkisp scaler will happily give us 1280x720 from it — at
 /// the full-res frame rate. 1920x1080 is the mode that runs at 30, and the ISP scales down from
-/// there, so nothing else in the pipeline changes with it.
+/// there, so nothing else in the pipeline changes with it. The GC2093 has only that mode, so the
+/// switch is a no-op there and harmless.
 ///
 /// This shells out to `media-ctl` once at startup, because the switch is a subdev ioctl on an
 /// entity whose name embeds its I2C bus and address (`m00_b_imx219 2-0010`) and therefore has to
 /// be discovered from the topology rather than named. Doing it here rather than in the unit means
 /// a run with `[media] camera` off needs no camera at all.
-fn pin_sensor_mode(fps: u32) -> Result<()> {
-    let (media, entity) = find_sensor()?;
+#[cfg(target_os = "linux")]
+fn pin_sensor_mode(
+    expected: crate::sensor::Expected,
+    fps: u32,
+) -> Result<&'static crate::sensor::Sensor> {
+    let (media, entity, sensor) = find_sensor(expected)?;
+    let mode = sensor.mode;
 
-    let format = format!("\"{entity}\":0[fmt:SRGGB10_1X10/1920x1080]");
+    if expected.why == crate::sensor::Why::Forced {
+        // Said at warn because it is the exception: whatever the board is, this sensor is what
+        // somebody asked for, and a robot running on a forced camera should say so in every log.
+        tracing::warn!(
+            sensor = sensor.name(),
+            "`[media] sensor` forces this camera rather than the board's"
+        );
+    }
+
+    let format = format!(
+        "\"{entity}\":0[fmt:{}/{}x{}]",
+        sensor.bus_format, mode.width, mode.height
+    );
     let output = std::process::Command::new("media-ctl")
         .args(["-d", &media, "--set-v4l2", &format])
         .output()
         .context("could not run media-ctl; it comes from v4l-utils")?;
 
-    if !output.status.success() {
+    let pinned = output.status.success();
+    if !pinned {
         // Not fatal: capture still works, just slower. Said loudly because a third of the frames
         // going missing looks like a network problem from the far end.
         tracing::warn!(
-            %media, %entity,
+            %media, %entity, sensor = sensor.name(),
             why = %String::from_utf8_lossy(&output.stderr).trim(),
-            "media-ctl would not set the 1920x1080 sensor mode — capture stays in the boot \
-             mode, which caps it at 21 fps, and `media.video` publishes no camera intrinsics \
-             because the exact framing is then the boot mode's (same ~62 deg field, different \
-             4:3->16:9 crop) rather than the pinned mode the calibration is for"
+            "media-ctl would not set the {}x{} sensor mode — capture stays in the boot mode, \
+             which on the IMX219 caps it at 21 fps, and `media.video` publishes no camera \
+             intrinsics because the exact framing is then the boot mode's rather than the pinned \
+             mode the calibration is for",
+            mode.width, mode.height
         );
-        let _ = SENSOR_MODE.set(None);
     } else {
-        let _ = SENSOR_MODE.set(Some(crate::camera::SensorMode::PINNED));
-        tracing::info!(%media, %entity, target_fps = fps, "sensor mode 1920x1080");
+        tracing::info!(
+            %media, %entity, sensor = sensor.name(), target_fps = fps,
+            "sensor mode {}x{}", mode.width, mode.height
+        );
     }
-    Ok(())
+    let _ = SENSOR.set(Found { sensor, pinned });
+    Ok(sensor)
 }
 
-/// The media device and entity name of the IMX219, from the topology.
+/// The media device, entity name and profile of the camera sensor, from the topology.
 ///
 /// Matched on a substring rather than a fixed name: the entity is `m00_b_imx219 2-0010`, which
-/// embeds the I2C bus and address, and those move with the overlay.
+/// embeds the I2C bus and address, and those move with the overlay. Which substrings count is
+/// [`crate::sensor::SENSORS`], and which one is accepted is `expected`: every graph is read
+/// before choosing, so a board with two cameras picks its own rather than the first it meets.
 ///
 /// **Every way this fails says which one it was.** An earlier version returned `Option` and
 /// reported "no imx219 entity" for all of them, which sent the first real run chasing the
-/// overlay when the actual cause was `media-ctl` being denied `/dev/media0`. The three cases want
-/// three different fixes and look identical from the outside.
-fn find_sensor() -> Result<(String, String)> {
+/// overlay when the actual cause was `media-ctl` being denied `/dev/media0`. The cases want
+/// different fixes and look identical from the outside.
+#[cfg(target_os = "linux")]
+fn find_sensor(
+    expected: crate::sensor::Expected,
+) -> Result<(String, String, &'static crate::sensor::Sensor)> {
     let mut nodes = 0;
     let mut failures = Vec::new();
+    // Every sensor found, with the media device it is on.
+    let mut ours: Vec<(String, String, &'static crate::sensor::Sensor)> = Vec::new();
+    let mut others = Vec::new();
 
     for index in 0..8 {
         let media = format!("/dev/media{index}");
@@ -1584,20 +1719,39 @@ fn find_sensor() -> Result<(String, String)> {
             continue;
         }
 
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            // "- entity 76: m00_b_imx219 2-0010 (1 pad, 1 link, 0 routes)"
-            let line = line.trim_start();
-            if !line.starts_with("- entity") || !line.contains("imx219") {
-                continue;
+        let topology = crate::sensor::Topology::read(&String::from_utf8_lossy(&output.stdout));
+        ours.extend(
+            topology
+                .ours
+                .into_iter()
+                .map(|(entity, sensor)| (media.clone(), entity, sensor)),
+        );
+        others.extend(topology.others);
+    }
+
+    // A sensor in the graph, right or wrong, is the answer: the refusal for the wrong one names
+    // what is there and what was expected, which is more use than a complaint about the nodes.
+    if !ours.is_empty() || !others.is_empty() {
+        let found: Vec<_> = ours
+            .iter()
+            .map(|(_, entity, sensor)| (entity.clone(), *sensor))
+            .collect();
+        return match expected.pick(&found, &others) {
+            Ok((entity, sensor)) => {
+                let media = ours
+                    .into_iter()
+                    .find(|(_, e, _)| *e == entity)
+                    .map(|(media, _, _)| media)
+                    .expect("picked from this list");
+                Ok((media, entity, sensor))
             }
-            let Some((_, rest)) = line.split_once(": ") else {
-                continue;
-            };
-            let name = rest.split(" (").next().unwrap_or(rest).trim();
-            if !name.is_empty() {
-                return Ok((media, name.to_string()));
-            }
-        }
+            Err(why) if found.is_empty() => bail!(
+                "{why}. This daemon has a profile for {}; another sensor needs an entry in \
+                 mediad::sensor, with its control units and caps.",
+                crate::sensor::known()
+            ),
+            Err(why) => bail!("{why}"),
+        };
     }
 
     if nodes == 0 {
@@ -1618,8 +1772,10 @@ fn find_sensor() -> Result<(String, String)> {
         );
     }
     bail!(
-        "read {nodes} media device(s) and none has an imx219 entity. The overlay loaded something, \
-         so DUCK_CAMERA_OVERLAY may name the wrong module for this camera."
+        "read {nodes} media device(s) and none has a sensor in it — this daemon drives {}. The \
+         overlay loaded something, so DUCK_CAMERA_OVERLAY may name the wrong module for this \
+         camera, or the sensor's driver did not probe (`dmesg` says which).",
+        crate::sensor::known()
     )
 }
 
@@ -1732,11 +1888,12 @@ fn wire_encoder_setup(sink: &gst::Element) -> Result<()> {
     Ok(())
 }
 
-/// Live count of what the consumers see, so [`meter_capture_rate`] can report it.
+/// Live count of what the consumers see, so [`meter_capture_rate`] can report it and the camera
+/// LED can follow it.
 ///
 /// An `AtomicU32` rather than a lock: it is written from `consumer-added`/`consumer-removed` on
 /// GStreamer threads and read from the capture probe on another, and neither may block the other.
-type Consumers = Arc<std::sync::atomic::AtomicU32>;
+pub type Consumers = Arc<std::sync::atomic::AtomicU32>;
 
 /// Count frames where they enter the pipeline, not where they leave it, and publish what we see.
 ///
@@ -1862,13 +2019,21 @@ fn wire_consumers(
     if glib::subclass::signal::SignalId::lookup("consumer-removed", sink.type_()).is_some() {
         let leaving = consumers.clone();
         sink.connect("consumer-removed", false, move |_| {
-            // `fetch_update` rather than `fetch_sub`, so a spurious removal cannot wrap the count
-            // around to four billion viewers.
-            let _ = leaving.fetch_update(
+            // A saturating decrement rather than `fetch_sub`, so a spurious removal cannot wrap
+            // the count around to four billion viewers. Spelled as a compare-exchange loop rather
+            // than `try_update`/`fetch_update`: `try_update` needs Rust 1.99, which the Yocto
+            // image's toolchain (1.94) does not have, and 1.99 deprecates `fetch_update`, which
+            // CI's `-D warnings` turns into a failure. The loop is the same thing on every
+            // version.
+            let mut current = leaving.load(std::sync::atomic::Ordering::Relaxed);
+            while let Err(actual) = leaving.compare_exchange_weak(
+                current,
+                current.saturating_sub(1),
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
-                |current| Some(current.saturating_sub(1)),
-            );
+            ) {
+                current = actual;
+            }
             None
         });
     } else {
@@ -1897,7 +2062,12 @@ fn wire_consumers(
 
         // Before the datachannel, because this is what the *offer* needs and the offer is
         // generated as soon as this handler returns. §6 of `remote-access-design.md`.
-        offer_relay_candidates(&webrtcbin, &peer, &relays);
+        let turn_servers = offer_relay_candidates(&webrtcbin, &peer, &relays);
+        // And before the offer too, for the same reason: gathering starts when the offer is
+        // built, so a listener attached after this handler returns can miss the early candidates.
+        count_gathered_candidates(&webrtcbin, &peer, turn_servers, &runtime);
+        // What was gathered is not what was used; this is the other half.
+        watch_ice_connection(&webrtcbin, &peer);
 
         match open_control_channel(&webrtcbin, &peer, &runtime) {
             Ok(channel) => {
@@ -1914,7 +2084,11 @@ fn wire_consumers(
     Ok(())
 }
 
-/// Add this robot's TURN servers to one consumer's `webrtcbin`, so its offer carries a `relay`.
+/// Add this robot's TURN servers to one consumer's `webrtcbin`, and answer how many it took.
+///
+/// **The count is of servers accepted, not of relay candidates gathered**, and the difference is
+/// the whole reason [`count_gathered_candidates`] exists. This runs before any allocation has been
+/// attempted, so it cannot know whether one will succeed.
 ///
 /// **Runs on the thread that builds the offer, and must not block it.** `Relays::uris` reads a
 /// cache and never does I/O for exactly this reason: a fetch here would delay every consumer's
@@ -1924,11 +2098,15 @@ fn wire_consumers(
 ///
 /// Nothing here is fatal. A robot that cannot offer a relay is reachable from most places; one
 /// whose negotiation broke because a credential was malformed is reachable from none.
-fn offer_relay_candidates(webrtcbin: &gst::Element, peer: &str, relays: &Arc<crate::turn::Relays>) {
+fn offer_relay_candidates(
+    webrtcbin: &gst::Element,
+    peer: &str,
+    relays: &Arc<crate::turn::Relays>,
+) -> usize {
     let uris = relays.uris();
     if uris.is_empty() {
         tracing::debug!(peer, "no relay servers held; offering host and srflx only");
-        return;
+        return 0;
     }
     // Checked before it is emitted, for the reason `open_control_channel` checks its own signal:
     // `emit_by_name` panics when a signal is absent or its signature has changed, and a panic in
@@ -1938,7 +2116,7 @@ fn offer_relay_candidates(webrtcbin: &gst::Element, peer: &str, relays: &Arc<cra
             peer,
             "webrtcbin has no add-turn-server signal; this consumer gets no relay candidate"
         );
-        return;
+        return 0;
     }
     let mut added = 0;
     for uri in uris.iter() {
@@ -1952,7 +2130,344 @@ fn offer_relay_candidates(webrtcbin: &gst::Element, peer: &str, relays: &Arc<cra
             tracing::warn!(peer, "a relay server was refused by webrtcbin");
         }
     }
-    tracing::info!(peer, relays = added, "offering relay candidates");
+    // **Named for what it counted.** It said "offering relay candidates" once, and six sessions
+    // that gathered no relay at all were read as proof the relay path was working.
+    tracing::info!(
+        peer,
+        servers = added,
+        "added TURN servers for this consumer"
+    );
+    added
+}
+
+/// What one consumer's ICE gathering actually produced, by candidate type.
+#[derive(Debug, Default)]
+struct Candidates {
+    host: usize,
+    srflx: usize,
+    prflx: usize,
+    relay: usize,
+    /// A candidate line with no `typ` in it, which is this parser being wrong rather than ICE.
+    unparsed: usize,
+}
+
+impl Candidates {
+    /// Count one `candidate:…` line by the token after `typ`.
+    ///
+    /// Read positionally rather than by index: the prefix differs between stacks — some hand over
+    /// `candidate:1 1 UDP …`, some the bare `1 1 UDP …` — and the extensions after the type are
+    /// open-ended. `typ` is the one fixture in the grammar (RFC 5245 §15.1).
+    fn count(&mut self, candidate: &str) {
+        match candidate
+            .split_whitespace()
+            .skip_while(|token| *token != "typ")
+            .nth(1)
+        {
+            Some("host") => self.host += 1,
+            Some("srflx") => self.srflx += 1,
+            Some("prflx") => self.prflx += 1,
+            Some("relay") => self.relay += 1,
+            _ => self.unparsed += 1,
+        }
+    }
+}
+
+/// How long to wait for gathering to finish before reporting what there is anyway.
+///
+/// **A tally that only lands when gathering completes is no use**, which a first run on a board
+/// proved: `ice-gathering-state` had not reached `Complete` by the time a ten-second session tore
+/// down — five TURN servers is five allocations, and the last relay candidate arrived after the
+/// control channel had already done its work — so the line that was supposed to settle the
+/// question never appeared at all. The failure being diagnosed is a session that dies early, so
+/// the diagnostic cannot be the one thing that needs it to live.
+const CANDIDATE_REPORT_AFTER: Duration = Duration::from_secs(8);
+
+/// Say what this consumer gathered: once, when gathering finishes or the deadline passes.
+///
+/// **`added TURN servers for this consumer` is not evidence that a relay candidate exists**, and
+/// this function is here because that was once read as though it were. That line counts the URIs
+/// `webrtcbin` accepted, inside `consumer-added`, before any allocation has been attempted — so a
+/// robot whose allocation fails every time, for a spent monthly allowance or a transport `libnice`
+/// will not use, logs exactly what a working robot logs. Six sessions on olducky were diagnosed
+/// against that line and `remote-access-design.md` §6 records the conclusion it led to.
+///
+/// So the journal now carries the other half: how many candidates of each type actually came back.
+/// `relay=0` on a robot that added servers is the failure that has no other symptom — ICE simply
+/// finds no pair and the session negotiates perfectly and carries nothing, which is also what a
+/// robot that was never offered a relay looks like.
+///
+/// `complete=false` marks a tally taken at [`CANDIDATE_REPORT_AFTER`] rather than at the end of
+/// gathering; more candidates may still have been coming. It is the ordinary case for a short
+/// session and it is still the answer to "was there a relay in there", which is what this is for.
+///
+/// **A candidate line carries no secret.** The relayed address is not one, and the host and srflx
+/// addresses are in the SDP the peer is about to receive anyway — unlike a TURN *URI*, which
+/// carries a password and is why `offer_relay_candidates` logs no URI at all. So the whole line is
+/// loggable, at debug, where it answers "which relayed address, over which transport".
+fn count_gathered_candidates(
+    webrtcbin: &gst::Element,
+    peer: &str,
+    turn_servers: usize,
+    runtime: &tokio::runtime::Handle,
+) {
+    // Both guarded before use, for the reason every other signal here is: `connect` and
+    // `connect_notify` panic on a name that is absent or has changed, and a panic in a C closure
+    // aborts the process rather than unwinding. An upstream rename should cost the journal a line,
+    // not take the daemon down.
+    if glib::subclass::signal::SignalId::lookup("on-ice-candidate", webrtcbin.type_()).is_none() {
+        tracing::warn!(
+            peer,
+            "webrtcbin has no on-ice-candidate signal; this session's candidate types will not \
+             be in the journal"
+        );
+        return;
+    }
+    if webrtcbin.find_property("ice-gathering-state").is_none() {
+        tracing::warn!(
+            peer,
+            "webrtcbin has no ice-gathering-state property; this session's candidate types will \
+             be reported on the deadline alone"
+        );
+    }
+
+    let tally = Arc::new(Mutex::new(Candidates::default()));
+    // Whoever gets there first reports; the other finds it already said and does nothing.
+    let said = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let counting = Arc::clone(&tally);
+    let owner = peer.to_owned();
+    webrtcbin.connect("on-ice-candidate", false, move |values| {
+        // (webrtcbin, mline_index, candidate).
+        let candidate = values.get(2).and_then(|value| value.get::<String>().ok())?;
+        // An empty string is how several stacks say "that was the last one"; it is not a candidate
+        // and must not count as one this parser failed to read.
+        if candidate.trim().is_empty() {
+            return None;
+        }
+        tracing::debug!(peer = %owner, %candidate, "gathered an ICE candidate");
+        if let Ok(mut counting) = counting.lock() {
+            counting.count(&candidate);
+        }
+        None
+    });
+
+    if webrtcbin.find_property("ice-gathering-state").is_some() {
+        let (finished, done, owner) = (Arc::clone(&tally), Arc::clone(&said), peer.to_owned());
+        webrtcbin.connect_notify(Some("ice-gathering-state"), move |webrtcbin, _| {
+            let state =
+                webrtcbin.property::<gst_webrtc::WebRTCICEGatheringState>("ice-gathering-state");
+            if state == gst_webrtc::WebRTCICEGatheringState::Complete {
+                report_candidates(&finished, &done, &owner, turn_servers, true);
+            }
+        });
+    }
+
+    // The deadline, on the tokio runtime this daemon already has rather than a GLib timeout: a
+    // consumer that never finishes gathering — or never lives long enough to — still gets a line.
+    let (pending, done, owner) = (tally, said, peer.to_owned());
+    runtime.spawn(async move {
+        tokio::time::sleep(CANDIDATE_REPORT_AFTER).await;
+        report_candidates(&pending, &done, &owner, turn_servers, false);
+    });
+}
+
+/// Follow one consumer's ICE connection state, and say which pair won when it connects.
+///
+/// **The tally above says what was offered; this says what was used**, and the two answer
+/// different questions. A robot can gather nine relay candidates and still fail, and a robot that
+/// gathers them and connects may be connecting *directly* — which is the ordinary, cheap outcome
+/// and also the one that tells you the relay was never exercised. Neither is visible without this.
+///
+/// The pair is read out of `get-stats` rather than guessed at, and the **raw structures are
+/// logged**. That is deliberate rather than lazy: the field names and enum nicks in
+/// `webrtcbin`'s stats are not something this code should assert from memory, and a summary
+/// built on a wrong field name would print confidently and say nothing — which is exactly the
+/// mistake `relays=N` made. One run against a real consumer turns this into a summary; until
+/// then the journal carries what is actually there.
+fn watch_ice_connection(webrtcbin: &gst::Element, peer: &str) {
+    if webrtcbin.find_property("ice-connection-state").is_none() {
+        tracing::warn!(
+            peer,
+            "webrtcbin has no ice-connection-state property; this session's ICE progress and \
+             selected pair will not be in the journal"
+        );
+        return;
+    }
+
+    // Once: `Connected` and `Completed` both arrive, and a flapping session would ask again on
+    // every transition.
+    let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let owner = peer.to_owned();
+    webrtcbin.connect_notify(Some("ice-connection-state"), move |webrtcbin, _| {
+        let state =
+            webrtcbin.property::<gst_webrtc::WebRTCICEConnectionState>("ice-connection-state");
+        tracing::info!(peer = %owner, ?state, "ICE connection state");
+
+        use gst_webrtc::WebRTCICEConnectionState as State;
+        if !matches!(state, State::Connected | State::Completed) {
+            return;
+        }
+        use std::sync::atomic::Ordering;
+        if asked
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        report_selected_pair(webrtcbin, &owner);
+    });
+}
+
+/// Ask `webrtcbin` for its stats and say which candidate pair carried the session.
+///
+/// Nothing here is fatal and nothing here blocks: `get-stats` is asynchronous through a
+/// `Promise`, its reply is borrowed for the duration of the callback, and a reply that never comes
+/// costs a missing line rather than a stuck consumer.
+///
+/// The shape below was read off a live session rather than assumed, which is the only reason it is
+/// safe to summarise: the `transport` stat names a `selected-candidate-pair-id`, that pair names a
+/// local and a remote candidate id, and each candidate carries `candidate-type`, `address`, `port`
+/// and `protocol`. A relay candidate also carries `url`, the TURN server that allocated it. When
+/// any of that is missing the raw entries go to the journal instead, so a stats change upstream
+/// degrades to what it did before rather than to silence.
+fn report_selected_pair(webrtcbin: &gst::Element, peer: &str) {
+    if glib::subclass::signal::SignalId::lookup("get-stats", webrtcbin.type_()).is_none() {
+        tracing::warn!(
+            peer,
+            "webrtcbin has no get-stats signal; no selected pair to report"
+        );
+        return;
+    }
+    let owner = peer.to_owned();
+    let promise = gst::Promise::with_change_func(move |reply| {
+        let stats = match reply {
+            Ok(Some(stats)) => stats,
+            Ok(None) => {
+                tracing::warn!(peer = %owner, "get-stats answered with nothing");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(peer = %owner, ?error, "get-stats failed");
+                return;
+            }
+        };
+        if !summarise_selected_pair(stats, &owner) {
+            // The shape has moved. Say everything candidate-shaped, verbatim, which is what this
+            // logged before it knew the field names — and is how they were learned.
+            for (name, value) in stats.iter() {
+                let Ok(nested) = value.get::<gst::Structure>() else {
+                    continue;
+                };
+                let text = nested.to_string();
+                if text.contains("candidate") {
+                    tracing::info!(peer = %owner, stat = %name, entry = %text, "ICE stat");
+                }
+            }
+        }
+    });
+    webrtcbin.emit_by_name::<()>("get-stats", &[&None::<gst::Pad>, &promise]);
+}
+
+/// One candidate, as the selected-pair line names it.
+fn describe_candidate(stats: &gst::StructureRef, id: &str) -> Option<String> {
+    let candidate = stats.get::<gst::Structure>(id).ok()?;
+    let kind = candidate
+        .get::<String>("candidate-type")
+        .unwrap_or_else(|_| "?".to_owned());
+    let address = candidate
+        .get::<String>("address")
+        .unwrap_or_else(|_| "?".to_owned());
+    let port = candidate.get::<u32>("port").unwrap_or_default();
+    let protocol = candidate
+        .get::<String>("protocol")
+        .unwrap_or_else(|_| "?".to_owned());
+    // Only a relay candidate has one, and it names the TURN server that allocated the address —
+    // which is the difference between "relayed" and "relayed through whom".
+    match candidate.get::<String>("url") {
+        Ok(url) if !url.is_empty() && url != "none" => {
+            Some(format!("{kind} {address}:{port}/{protocol} via {url}"))
+        }
+        _ => Some(format!("{kind} {address}:{port}/{protocol}")),
+    }
+}
+
+/// The selected pair as one line, or `false` if the stats did not carry one.
+///
+/// **`local=relay …` is the whole point.** A session that negotiated over a relay and one that
+/// found a direct pair look identical everywhere else in this journal, and they mean opposite
+/// things: the first says the relay path works, the second says it was never exercised.
+fn summarise_selected_pair(stats: &gst::StructureRef, peer: &str) -> bool {
+    // The transport names the pair; there is one per DTLS transport and a session has one.
+    let selected = stats.iter().find_map(|(_, value)| {
+        value
+            .get::<gst::Structure>()
+            .ok()?
+            .get::<String>("selected-candidate-pair-id")
+            .ok()
+    });
+    let Some(selected) = selected else {
+        return false;
+    };
+    let Ok(pair) = stats.get::<gst::Structure>(selected.as_str()) else {
+        return false;
+    };
+    let (Ok(local), Ok(remote)) = (
+        pair.get::<String>("local-candidate-id"),
+        pair.get::<String>("remote-candidate-id"),
+    ) else {
+        return false;
+    };
+    let (Some(local), Some(remote)) = (
+        describe_candidate(stats, &local),
+        describe_candidate(stats, &remote),
+    ) else {
+        return false;
+    };
+    tracing::info!(peer, %local, %remote, "selected candidate pair");
+    true
+}
+
+/// Log one consumer's tally, the first time anybody asks.
+fn report_candidates(
+    tally: &Mutex<Candidates>,
+    said: &std::sync::atomic::AtomicBool,
+    peer: &str,
+    turn_servers: usize,
+    complete: bool,
+) {
+    use std::sync::atomic::Ordering;
+    if said
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let Ok(tally) = tally.lock() else {
+        return;
+    };
+    tracing::info!(
+        peer,
+        host = tally.host,
+        srflx = tally.srflx,
+        prflx = tally.prflx,
+        relay = tally.relay,
+        unparsed = tally.unparsed,
+        complete,
+        "gathered ICE candidates"
+    );
+    // The one combination that is silent otherwise, and the one worth waking up for: the
+    // credentials were there, `webrtcbin` took them, and the allocation still produced nothing.
+    // A consumer that needs a relay has no path, and every other line looks healthy.
+    if turn_servers > 0 && tally.relay == 0 {
+        tracing::warn!(
+            peer,
+            servers = turn_servers,
+            complete,
+            "TURN servers were added and no relay candidate came back, so a consumer that cannot \
+             reach this robot directly has no path to it; the allocation failed rather than the \
+             credentials being missing"
+        );
+    }
 }
 
 /// Create the `control` datachannel on one peer's `webrtcbin` and bridge it to channels.
@@ -1965,12 +2480,11 @@ fn open_control_channel(
     // aborts the process rather than unwinding, because this runs inside a C closure. Checked
     // first so an upstream change becomes a logged refusal to open a control channel, with the
     // video track still working.
-    for signal in ["create-data-channel"] {
-        if glib::subclass::signal::SignalId::lookup(signal, webrtcbin.type_()).is_none() {
-            return Err(anyhow!(
-                "webrtcbin has no {signal} signal; gst-plugins-rs may have changed it"
-            ));
-        }
+    if glib::subclass::signal::SignalId::lookup("create-data-channel", webrtcbin.type_()).is_none()
+    {
+        return Err(anyhow!(
+            "webrtcbin has no create-data-channel signal; gst-plugins-rs may have changed it"
+        ));
     }
     // Reliable and ordered, which is the default and is what §2 wants for `control` —
     // `remote-webrtc.md` §6 covers why the first version opens only this one.
@@ -2066,7 +2580,7 @@ mod tests {
             fps: 15,
             rotation: Rotation::None,
         };
-        let (pipeline, _channels, frames, _stream) = start(
+        let (pipeline, _channels, frames, _stream, _peers) = start(
             Source::Test,
             &producer,
             &settings,
@@ -2087,12 +2601,64 @@ mod tests {
         assert_eq!(frame.data.len(), 320 * 240 * 2, "packed UYVY");
     }
 
+    /// The four types ICE defines, in the shape `webrtcbin` hands them over.
+    ///
+    /// Real lines, because the fields after the type are what a naive index-based parser trips on:
+    /// an srflx and a relay both carry `raddr`/`rport` after `typ`, and a TCP candidate carries a
+    /// `tcptype` that a fixed offset would read as the type.
+    #[test]
+    fn every_candidate_type_is_counted_as_itself() {
+        let mut tally = Candidates::default();
+        for line in [
+            "candidate:1 1 UDP 2015363327 192.168.10.116 47078 typ host",
+            "candidate:3 1 TCP 1518149375 192.168.10.116 9 typ host tcptype active",
+            "candidate:2 1 UDP 1677729535 45.80.22.227 47078 typ srflx raddr 192.168.10.116 \
+             rport 47078",
+            "candidate:4 1 UDP 92216575 141.101.90.1 60000 typ relay raddr 45.80.22.227 \
+             rport 47078",
+            "candidate:5 1 UDP 1845501695 10.0.0.9 51000 typ prflx",
+        ] {
+            tally.count(line);
+        }
+
+        assert_eq!(
+            (tally.host, tally.srflx, tally.prflx, tally.relay),
+            (2, 1, 1, 1)
+        );
+        assert_eq!(tally.unparsed, 0, "every line above has a `typ`");
+    }
+
+    /// Some stacks hand over the bare attribute and some keep the `candidate:` prefix, and the
+    /// type is read by position relative to `typ` rather than to the start of the line.
+    #[test]
+    fn the_prefix_is_not_what_locates_the_type() {
+        let mut tally = Candidates::default();
+        tally.count("candidate:1 1 UDP 2015363327 192.168.10.116 47078 typ relay");
+        tally.count("1 1 UDP 2015363327 192.168.10.116 47078 typ relay");
+        assert_eq!(tally.relay, 2);
+    }
+
+    /// **A line this parser cannot read is counted apart from the types**, so a grammar change
+    /// upstream shows up as `unparsed=N` rather than as a robot that gathered nothing.
+    #[test]
+    fn a_line_without_a_type_is_counted_as_unparsed_and_not_as_absent() {
+        let mut tally = Candidates::default();
+        tally.count("candidate:1 1 UDP 2015363327 192.168.10.116 47078");
+        tally.count("typ");
+        assert_eq!(tally.unparsed, 2, "a trailing `typ` names nothing either");
+        assert_eq!(
+            (tally.host, tally.srflx, tally.prflx, tally.relay),
+            (0, 0, 0, 0)
+        );
+    }
+
     /// A frame whose every byte is `tag`, so a test can say *which* capture came back.
     fn frame(tag: u8) -> Frame {
         Frame {
             width: 4,
             height: 2,
             format: CAPTURE_FORMAT,
+            captured_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(tag as u64),
             data: vec![tag; 16],
         }
     }

@@ -2,7 +2,7 @@
 # Provision a board from your own machine, in one command.
 #
 #   export DUCK_TOKEN=...              # only while the repository is private
-#   ./scripts/provision-board.sh radxa@192.168.1.42
+#   ./scripts/provision-board.sh microduck@192.168.1.42
 #
 # The target is `[user@]host`, and the host can be a name or an address. An address is the
 # normal case on this hardware: mDNS on the Radxa image is unreliable, so `radxa-zero3.local`
@@ -22,6 +22,10 @@
 #                     if that build cannot be installed or is rolled back — a dev board quietly
 #                     running stable when a branch was asked for is worse than a clear stop.
 #                     Needs the branch build to exist, so give CI its minute or two first.
+#   --board BOARD     which electronic board this is: `zero3` (the default, the Radxa Zero 3W)
+#                     or `beta` (the custom board). Written to robotd.toml's `[board] version`,
+#                     which decides the releases the robot can install. The bring-up itself
+#                     (setup-board.sh) is still the Zero 3W's on either.
 #   --name NAME       name the robot, at the end of provisioning: `--name Ducky`. Optional —
 #                     without it the board names itself `duck-<four hex>` from its SoC serial,
 #                     which is already unique per board. Changeable later at any time with
@@ -113,6 +117,7 @@ NO_DEV_KEY=""
 USE_LOCAL=""
 NO_BLE=""
 WEIRD_BLE=""
+BOARD=""
 NO_GSTREAMER=""
 NO_RKAIQ=""
 PAUSE_BTD=""
@@ -185,6 +190,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --ref)        REF="${2:?--ref needs a branch}"; shift 2 ;;
         --name)       ROBOT_NAME="${2:?--name needs a name}"; shift 2 ;;
+        --board)      BOARD="${2:?--board needs a board}"; shift 2 ;;
         --forget-host-key) FORGET_KEY=1; shift ;;
         --dev-key)    DEV_KEY="${2:?--dev-key needs a path}"; shift 2 ;;
         --no-dev-key) NO_DEV_KEY=1; shift ;;
@@ -201,6 +207,13 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$HOST" ] || usage 2
+
+# The names are `robotd_params::board::BOARD_LABELS`; install.sh checks again on the board.
+case "$BOARD" in
+    ""|zero3) ;;
+    beta) warn "--board beta declares the board; setup-board.sh still brings up a Zero 3W" ;;
+    *) die "--board ${BOARD}: zero3 or beta" ;;
+esac
 
 command -v ssh >/dev/null 2>&1 || die "ssh is required"
 command -v scp >/dev/null 2>&1 || die "scp is required"
@@ -291,8 +304,24 @@ alive() (
 # had merely moved to a new lease mid-install — and the watcher announced provisioning complete and
 # then a health check that could not connect. Which of the two it is decides whether to stop or to
 # go looking, so it cannot be collapsed.
+#
+# **Only `test`'s own 1 means the file is gone.** ssh exits 255 when *it* fails, and it fails for
+# one round-trip at a time on a board busy unpacking packages: a 5 s connect timeout and a 6 s
+# keepalive budget are both reachable while apt runs triggers on 1 GB of memory. Reading any
+# non-zero as "absent" let one slow answer, followed by a successful `alive`, announce provisioning
+# finished mid-apt — and then run `robotctl health` on a board that did not have robotctl yet.
 still_provisioning() {
-    if rsh "test -f ${STATE}" >/dev/null 2>&1; then
+    _state=0
+    rsh "test -f ${STATE}" >/dev/null 2>&1 || _state=$?
+    if [ "$_state" != 0 ] && [ "$_state" != 1 ]; then
+        # No answer about the file at all. Ask again next time round if the board is there;
+        # otherwise it is the lost board the verdict 2 exists for.
+        if alive 10; then
+            return 0
+        fi
+        return 2
+    fi
+    if [ "$_state" = 0 ]; then
         # The state file outlives a phase 2 that *failed*: `provision.sh` removes it only on the way
         # out cleanly, so its presence alone cannot tell a board still working from one that stopped
         # with an error. Ask systemd, which knows.
@@ -695,6 +724,7 @@ _env="DUCK_TOKEN='${DUCK_TOKEN:-}'"
 [ -z "$REF" ]     || _env="${_env} DUCK_REF='${REF}'"
 [ -z "$DEV_KEY" ] || _env="${_env} DUCK_DEV_KEY=/tmp/team.dev.pub"
 [ -z "$WEIRD_BLE" ] || _env="${_env} DUCK_WEIRD_BLE=1"
+[ -z "$BOARD" ]     || _env="${_env} DUCK_BOARD=${BOARD}"
 [ -z "$PAUSE_BTD" ]  || _env="${_env} DUCK_PAUSE_BTD=1"
 [ -z "$NO_GSTREAMER" ] || _env="${_env} DUCK_GSTREAMER=0"
 [ -z "$NO_RKAIQ" ]     || _env="${_env} DUCK_RKAIQ=0"

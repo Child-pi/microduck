@@ -46,6 +46,15 @@ struct Args {
     #[arg(long, global = true)]
     robot_socket: Option<PathBuf>,
 
+    /// The account credential this robot signs in to, and the file `mediad` reads back.
+    ///
+    /// On a robot the default is right and nobody types it. It exists for the simulator, where the
+    /// daemons run as a person rather than as root and `/etc/robot` is not writable — see
+    /// `docs/robot/simulation.md`. `mediad --token` is the same flag on the reading side, and the
+    /// two must name one file or the duck signs in and never registers.
+    #[arg(long, global = true, default_value = updater::account::DEFAULT_PATH)]
+    token: PathBuf,
+
     /// Run boot recovery, then exit without serving.
     ///
     /// Note this **performs** recovery rather than reporting it: `record_boot` advances every armed
@@ -531,6 +540,11 @@ async fn serve(args: Args) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let (config, keys, robot, faults) = (loaded.config, loaded.keys, loaded.robot, loaded.faults);
+    // `vetbook.share` reads the book from the same `robotd` the engine talks to.
+    let vetbook_robot_socket = args
+        .robot_socket
+        .clone()
+        .unwrap_or_else(|| config.robot_socket.clone());
 
     // Read before `config` is moved into the engine.
     let config_check_interval = config.check_interval;
@@ -606,9 +620,13 @@ async fn serve(args: Args) -> ExitCode {
     let check_interval = config_check_interval;
     let auto_apply = config_auto_apply;
 
-    let server = std::sync::Arc::new(updater::ipc::Server::with_policy(
-        engine, allow_uids, allow_gids,
-    ));
+    let server = std::sync::Arc::new(
+        updater::ipc::Server::with_policy_at(engine, allow_uids, allow_gids, args.token.clone())
+            .with_vetbook_sources(updater::vetbook::Sources {
+                robot_socket: vetbook_robot_socket,
+                ..Default::default()
+            }),
+    );
     let socket = args.socket.clone();
 
     // Unconditional, unlike the update scheduler below: a Hugging Face token lasts thirty days

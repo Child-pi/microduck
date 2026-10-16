@@ -11,12 +11,9 @@
 /// Left leg (5) · neck/head/mouth (5) · right leg (5).
 pub const NUM_JOINTS: usize = 15;
 
-/// Dynamixel IDs, indexed as [`JOINT_NAMES`].
-pub const JOINT_IDS: [u8; NUM_JOINTS] = [
-    20, 21, 22, 23, 24, // left leg
-    30, 31, 32, 33, 34, // neck, head, mouth
-    10, 11, 12, 13, 14, // right leg
-];
+/// Dynamixel IDs, indexed as [`JOINT_NAMES`] — from the protocol crate too, since
+/// `robot.health` names a missing servo by its ID and a client has to say which joint it is.
+pub use duck_ipc_proto::JOINT_IDS;
 
 /// Joint names, from the protocol crate — the wire indexes `joints` and `targets`
 /// positionally, so that order and this one cannot be allowed to drift apart. The
@@ -24,6 +21,7 @@ pub const JOINT_IDS: [u8; NUM_JOINTS] = [
 pub use duck_ipc_proto::JOINT_NAMES;
 
 const _: () = assert!(JOINT_NAMES.len() == NUM_JOINTS);
+const _: () = assert!(JOINT_IDS.len() == NUM_JOINTS);
 
 /// The mouth is absent from every alpha policy — they are all 61-D observation, 14-action,
 /// and the action vector skips this index. Named so that omission is deliberate rather
@@ -52,6 +50,31 @@ pub const DEFAULT_POSITION: [f64; NUM_JOINTS] = [
     0.4579,  // right_hip_pitch
     0.0049,  // right_knee
     -0.4530, // right_ankle
+];
+
+/// Rest pose: where a seated robot settles with its torque off. Recorded on graphite-bang
+/// sitting stably untorqued (2026-10-03), averaged over a second of samples.
+///
+/// The shutdown eases the joints here from the policy's seat before cutting torque. The seat
+/// the sitstand network holds is not where the robot comes to rest once nothing holds it, so
+/// cutting torque straight from the seat let the robot sag forward. Arriving here first, it
+/// is already where it would fall to.
+pub const REST_POSITION: [f64; NUM_JOINTS] = [
+    0.3129,  // left_hip_yaw
+    0.4050,  // left_hip_roll
+    -0.2338, // left_hip_pitch
+    1.5493,  // left_knee
+    0.5522,  // left_ankle
+    0.9572,  // neck_pitch
+    1.4787,  // head_pitch
+    -0.0129, // head_yaw
+    -0.0522, // head_roll
+    -0.0121, // mouth
+    0.0353,  // right_hip_yaw
+    -0.5660, // right_hip_roll
+    0.2853,  // right_hip_pitch
+    -1.4696, // right_knee
+    -0.4096, // right_ankle
 ];
 
 /// Mouth travel, radians: closed and fully open. The alpha reuses the v1.6 range,
@@ -90,14 +113,41 @@ pub const FACTORY_BAUD_RATE: u32 = 57_600;
 /// `return_delay_time` is the load-bearing one: the XL330 ships at 250, which is 500 µs of
 /// turnaround *per device*. Across 16 devices that is 8 ms per tick — 40% of a 20 ms budget
 /// — spent waiting for servos to get around to answering. The rest are here because the
-/// runtime found them worth pinning; `shutdown = 52` is the error mask that latches on
-/// overload, overheating and input-voltage faults.
+/// runtime found them worth pinning.
+///
+/// `shutdown = 52` is `0b110100` — overload, electrical shock, overheating — with the
+/// input-voltage bit **clear**, where the factory's 53 sets it. That bit is what clears torque
+/// once the supply passes the servo's `Max Voltage Limit`, which nothing here writes and which
+/// therefore stays at its default 7.0 V. A charged 2S pack sits above that, so the clear bit is
+/// the reason fifteen servos do not latch themselves off a fully charged battery. Read as
+/// "latches on input-voltage faults" it says the opposite of what it does.
 pub const EXPECTED_REGISTERS: &[(&str, u8)] = &[
     ("return_delay_time", 0),
     ("baud_rate", 3), // 3 = 1 Mbps, must agree with BAUD_RATE
     ("pwm_slope", 255),
     ("shutdown", 52),
 ];
+
+/// `homing_offset` on the knees, in raw position counts (0.088° each, so −45°).
+///
+/// Every other joint is at 0. The value is `microduck_runtime`'s `setup_motor_rpi.py`, the
+/// flashing rig every servo on a built robot went through, so [`DEFAULT_POSITION`] and every
+/// policy assume it. A servo straight from the box arrives at 0, so a knee adopted without this
+/// reads and drives 45° off, with nothing in the journal to say why.
+pub const KNEE_HOMING_OFFSET: i32 = -512;
+
+/// Right and left knee: the only joints whose `homing_offset` is not 0.
+pub const KNEE_IDS: [u8; 2] = [13, 23];
+
+/// The `homing_offset` a servo should hold, asserted alongside [`EXPECTED_REGISTERS`]. It is
+/// kept apart from them because it is an `i32` and differs per joint.
+pub fn homing_offset(id: u8) -> i32 {
+    if KNEE_IDS.contains(&id) {
+        KNEE_HOMING_OFFSET
+    } else {
+        0
+    }
+}
 
 /// Index of a joint by name. Linear scan over 15 entries, used at startup and in tests.
 pub fn joint_index(name: &str) -> Option<usize> {
@@ -110,6 +160,12 @@ pub fn joint_index(name: &str) -> Option<usize> {
 // report as their own supply (`crate::bus::DynamixelIo::bus_voltage`), which is the pack
 // seen through the bus — so it sags under load and recovers when the robot stands still.
 // That is why the span below is *usable-under-load*, not the cell chemistry's range.
+//
+// The span is a statement about the *rail*, and it holds because that rail is the pack: the
+// servos are fed the 2S battery, not a regulated 5 V. A servo on a bench supply reads its own
+// supply voltage like any other, so 5 V lands under `BATTERY_EMPTY_V` and maps to 0% — the
+// mapping working as defined rather than a fault to chase. Anything that regulates the servo
+// rail has to move these two constants with it.
 
 /// Off a full charge, under load. NP-F550, 2S Li-ion.
 pub const BATTERY_FULL_V: f64 = 8.2;
@@ -172,6 +228,43 @@ mod tests {
         assert!(!JOINT_IDS.contains(&FACTORY_ID));
         assert_ne!(IMU_DXL_ID, FACTORY_ID);
         assert_ne!(FACTORY_BAUD_RATE, BAUD_RATE);
+    }
+
+    /// `shutdown` is the one register whose *bits* are the decision rather than the number:
+    /// the input-voltage bit is cleared on purpose, and that is what lets the pack's range run
+    /// across a servo rated to 6.0 V. The factory default is 53 — one bit away — so a later
+    /// edit that "restores the default" should meet a test rather than a comment.
+    #[test]
+    fn the_shutdown_mask_clears_the_input_voltage_bit() {
+        let want = EXPECTED_REGISTERS
+            .iter()
+            .find(|(n, _)| *n == "shutdown")
+            .map(|&(_, v)| v)
+            .expect("shutdown is an expected register");
+        const OVERLOAD: u8 = 1 << 5;
+        const ELECTRICAL_SHOCK: u8 = 1 << 4;
+        const OVERHEATING: u8 = 1 << 2;
+        const INPUT_VOLTAGE: u8 = 1 << 0;
+        assert_eq!(
+            want,
+            OVERLOAD | ELECTRICAL_SHOCK | OVERHEATING,
+            "the three faults worth latching on, with input-voltage clear"
+        );
+        assert_eq!(want & INPUT_VOLTAGE, 0);
+    }
+
+    /// The knee IDs are positional facts about [`JOINT_IDS`]; a renumbering that moved them
+    /// would put the offset on a hip.
+    #[test]
+    fn only_the_knees_have_a_homing_offset() {
+        for (i, &id) in JOINT_IDS.iter().enumerate() {
+            let want = if JOINT_NAMES[i].ends_with("_knee") {
+                KNEE_HOMING_OFFSET
+            } else {
+                0
+            };
+            assert_eq!(homing_offset(id), want, "{}", JOINT_NAMES[i]);
+        }
     }
 
     /// `MOUTH_INDEX` is used to skip a slot when mapping 14 policy actions onto 15 joints.

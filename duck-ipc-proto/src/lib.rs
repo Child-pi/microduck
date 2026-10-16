@@ -337,7 +337,140 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// A new variant on a tagged enum is what a robotctl built before it cannot decode, which is the
 /// one reason this is a bump rather than a note: the tap is still `padd`'s own socket, and every
 /// other client is untouched.
-pub const API_VERSION: u32 = 28;
+/// # v30 — `homed`, so a client can wait instead of guessing
+///
+/// One `Option<bool>` on [`PoliciesResult`]. `robot.do` refuses a skill while the robot is on its
+/// way to its home pose, and that refusal is a second old and resolves by itself — but from the
+/// wire it is `accepted: false` and a sentence, indistinguishable from "press Start on the pad",
+/// which stays true until somebody acts. A client that installs a policy triggers a reload,
+/// the reload sends the robot home, and the `robot.do` that follows is refused by the client's own
+/// previous call. Without this the only ways out are matching on the reason string or retrying
+/// blindly through refusals that will never clear.
+///
+/// `None` is "this robot does not say", which is what an older `robotd` sends and what a client
+/// must fall back from rather than read as `false`.
+/// # v31 — `sitting`, because "stand up" is two calls
+///
+/// One more `Option<bool>` on [`PoliciesResult`], beside `homed` and for the same reason: a client
+/// choosing what to send needs the robot's answer rather than its own guess. A duck on its feet
+/// stands with `robot.init`; a duck in its seat is held there by the `sit_toggle` latch, and
+/// `init` argues with that rather than winning. Without it a client either guesses — sitting a
+/// standing duck down every other press — or asks somebody to reach for the pad, which is what the
+/// playground did.
+/// # v32 — a status that can say "degraded"
+///
+/// Two fields on [`ComponentStatus`], beside `healthy`, which was a boolean answering a
+/// three-way question. `updaterd` asks `robotd` for a verdict and gets one of five; the health
+/// gate sorts them into *commit* (healthy, degraded) and *revert* (unhealthy, unreachable,
+/// unreadable), which is the three-way question `updater-design.md` §8 states. Status collapsed
+/// all four non-healthy verdicts into `healthy: false`, so a bench board with no servo power —
+/// a release the gate had just committed, running correctly — was indistinguishable on the wire
+/// from a robot whose control loop was dead.
+///
+/// That cost real time: it is how a rolled-back release was read as having been rolled back over
+/// its policy set. §4.1 asks of this route that "the app must be able to see 'daemon unhealthy,
+/// version X, last update failed'", and the app could not.
+///
+/// Both default, so an older `updaterd` reads exactly as it did before: `degraded` false is the
+/// strict verdict, and `reason` absent is "it did not say".
+/// # v33 — what the heat is costing, beside the temperature
+///
+/// One `Option<CpuThrottle>` on [`HealthResult`], beside `cpu_temp_c`. A board reported as
+/// "96 °C" reads as a warm robot; the same board is in fact pinned to 408 MHz of 1800 by the
+/// thermal governor, which is the sentence that explains a duck walking badly. Without it the
+/// clock ceiling is only reachable by sshing to the robot and reading `sysfs` — which is not
+/// something the one command a human already runs should send them away to do.
+///
+/// `None` is "this robot does not say": an older `robotd`, or a board with no `cpufreq` sysfs.
+/// # v34 — what a policy is, on the line that lists it
+///
+/// `description` and `preview` on [`PolicySearchHit`]. A search answered with `org/name`, an
+/// origin and a like count, which is enough to install something and not enough to choose it:
+/// every hit is somebody's `microduck-<something>`, and the name was the whole of what a person
+/// had to go on. The description was already in the manifest, already read on the fetch path and
+/// already shown by the policy playground — a list of policies is where it is wanted, and a
+/// search that makes someone install a policy to find out what it does is why it is here now.
+///
+/// Both are absent from an older `updaterd` and neither needs a fallback: a client with no
+/// description shows the id, which is what it showed before.
+///
+/// # v35 — when the update source last answered
+///
+/// One `Option<i64>` on [`ComponentStatus`]. `update.status` says when each component's update
+/// source last answered with a manifest that verified, so a robot that has stopped reaching its
+/// source stops looking up to date: a failed check left the installed release and no error, which
+/// is what a robot with nothing to install looks like.
+///
+/// Absent is "it has not answered since this robot started recording", which is what an older
+/// `updaterd` sends and what a client must not read as a fresh check.
+///
+/// # v36 — measured joint velocity and load, on the state stream
+///
+/// [`RobotState::velocities`] and [`RobotState::currents_ma`]: the two blocks the control loop has
+/// read beside position on every tick and never published. Neither is recoverable from outside
+/// the daemon — differencing `joints` across a decimated subscription is not a velocity, and
+/// present current is the only measure of external force this robot has. Additive, on the rule
+/// `odom` set: absent from a daemon predating it, and absent stays distinguishable from zero.
+///
+/// Absent is also what a backend with nothing to measure sends — `--fake` has no servos — and
+/// what a robot with `[control] publish_velocity_and_load` off sends. A client that reads absent
+/// as "not told" rather than as zero handles all three without having to know which.
+///
+/// # v37 — how the last check of the update source went
+///
+/// [`ComponentStatus::last_check_attempt`]: when the last check ran, and the error if it got no
+/// answer. v35 made "never answered" visible, and it was two states: checks that keep failing, and
+/// an `updaterd` that has not run its first check yet — every board for the minute after it
+/// starts, including the one right after the update that brought v35 in. Both warned. The attempt
+/// tells them apart, and its error is what the warning was pointing at the journal for.
+///
+/// # v38 — which servos are missing, while the bus is coming up
+///
+/// [`BusHealth::missing`]: the servo IDs that did not answer the last ping round while `robotd`
+/// waits for the bus. A robot with three servos unplugged reported "no robot on the motor bus",
+/// which is the wording for servo power being off, while the daemon's own log named the three.
+/// Additive: absent from an older `robotd`, and an empty list reads as "not told", which is what
+/// the old wording assumed anyway.
+///
+/// # v39 — `robot.rest`
+///
+/// [`method::ROBOT_REST`]: `robot.shutdown`'s sit and rest pose, ending in torque off and a servo
+/// reboot instead of a power-off. The pad's held Select, released before the power-off threshold.
+/// A new route: a `robotd` predating it answers METHOD_NOT_FOUND, by name.
+///
+/// # v40 — `robot.flashlight`
+///
+/// [`method::ROBOT_FLASHLIGHT`]: the beta board's RGB LED as a flashlight, on, off or toggled, in
+/// one of the seven colours three on/off channels make. The pad's Home button toggles it. A new
+/// route: a `robotd` predating it answers METHOD_NOT_FOUND, by name.
+///
+/// # v41 — an IMU board that does not answer, while the bus is coming up
+///
+/// [`ImuHealth::missing`]: every servo answered and the IMU board did not. The first combined read
+/// then failed on every attempt, and `robot.health` said "no robot on the motor bus" — the wording
+/// for servo power being off — about a robot whose fifteen servos had just answered their pings.
+/// Additive: absent from an older `robotd`, and `false` reads as "not told", which is what the old
+/// wording assumed anyway.
+///
+/// # v42 — the vet book
+///
+/// [`method::ROBOT_VETBOOK`] and [`method::ROBOT_VETBOOK_NOTE`]: the robot's lifetime record —
+/// hours on, distance walked, falls and pickups, every servo `robotd` has adopted and how long
+/// the one before it lasted, and dated notes ([`vetbook`]). New routes: a `robotd` predating them answers METHOD_NOT_FOUND, by name.
+///
+/// # v43 — sharing the vet book
+///
+/// [`method::VETBOOK_SHARE`]: `updaterd` publishes the vet book to a public dataset on the signed-in
+/// Hugging Face account, `<user>/<robot name>-vetbook`, and answers with the link to its card
+/// ([`VetbookShareResult`]). A new route: an `updaterd` predating it answers METHOD_NOT_FOUND.
+///
+/// # v44 — records from every sensor
+///
+/// [`method::ROBOT_VETBOOK_TALLY`]: another daemon's counts and personal records — photos taken,
+/// laser sweep, nearest object — merged into the vet book by `robotd`, which owns it. The book
+/// gains three maps for them ([`vetbook::Life::tallies`], `highs`, `lows`), additive: an older
+/// book loads with them empty. A new route: a `robotd` predating it answers METHOD_NOT_FOUND.
+pub const API_VERSION: u32 = 44;
 
 /// The observation width every policy this robot family runs is built against.
 ///
@@ -372,6 +505,9 @@ pub const UPDATE_MAX_SILENCE_SECONDS: u64 = 600;
 
 pub const DEFAULT_SOCKET: &str = "/run/updaterd.sock";
 
+pub mod led;
+pub mod vetbook;
+
 /// Where each service listens by default.
 ///
 /// These are defaults matching the shipped units, not a contract the daemons are bound by —
@@ -395,6 +531,10 @@ pub mod socket {
     /// Under `/run/tofd/` for the same reason as the pad's: it is that unit's
     /// `RuntimeDirectory=`, so systemd removes the socket when the daemon stops.
     pub const TOF: &str = "/run/tofd/tof.sock";
+
+    /// `mediad`'s on-demand raw-frame endpoint. It is local-only: a raw camera frame is for a
+    /// recorder or perception process on the robot, not a multi-megabyte WebRTC control reply.
+    pub const MEDIA: &str = "/run/mediad/media.sock";
 }
 
 /// Where each daemon publishes what it is running: `/run/<service>/identity.json`.
@@ -447,10 +587,36 @@ pub const JOINT_NAMES: [&str; 15] = [
     "right_ankle",
 ];
 
+/// Each joint's Dynamixel ID, indexed as [`JOINT_NAMES`].
+///
+/// Protocol for the same reason the names are: [`BusHealth::missing`] carries IDs, because the ID
+/// is what is printed on the servo a person has to go and find, and a client has to be able to
+/// say which joint that is. `duck-control` re-exports it, so the IDs the bus is driven with and
+/// the ones a client names are one table.
+pub const JOINT_IDS: [u8; 15] = [
+    20, 21, 22, 23, 24, // left leg
+    30, 31, 32, 33, 34, // neck, head, mouth
+    10, 11, 12, 13, 14, // right leg
+];
+
+/// The joint a Dynamixel ID drives, if it is one of [`JOINT_IDS`].
+pub fn joint_of(id: u8) -> Option<&'static str> {
+    JOINT_IDS
+        .iter()
+        .position(|&known| known == id)
+        .map(|index| JOINT_NAMES[index])
+}
+
 /// Method names, as they go on the wire. Namespaced so a new namespace cannot collide
 /// with `update.*`. [`Call`] is the typed form.
 pub mod method {
     pub const HELLO: &str = "hello";
+
+    /// One raw camera frame. `mediad` answers the JSON-RPC header, followed immediately by the
+    /// bytes named in that header, on its local Unix socket.
+    /// Deliberately not a `Call`: its binary tail must never enter Service/Lane routing
+    /// or the WebRTC control datachannel. Local clients dial `socket::MEDIA` explicitly.
+    pub const MEDIA_FRAME: &str = "media.frame";
 
     pub const CHECK: &str = "update.check";
     pub const APPLY: &str = "update.apply";
@@ -539,6 +705,12 @@ pub mod method {
     /// or `robot.enable` brings it up from a known state. Discrete; send as a request.
     pub const ROBOT_REBOOT_MOTORS: &str = "robot.rebootMotors";
 
+    /// Put the robot down for a rest: [`ROBOT_SHUTDOWN`]'s sequence without the power-off. A
+    /// driving robot sits with the sitstand policy, eases into the rest pose, then has torque cut
+    /// and every servo rebooted ([`ROBOT_REBOOT_MOTORS`]); a robot that cannot sit is rebooted
+    /// where it is. Ends limp, ready for `robot.init`. Discrete; send as a request.
+    pub const ROBOT_REST: &str = "robot.rest";
+
     // ── skills ───────────────────────────────────────────────────────────────
     //
     // One-shot scripted moves, ported from `microduck_runtime`. Each swaps a dedicated
@@ -568,6 +740,9 @@ pub mod method {
     /// is diagnostics, not danger), but "accepted" from a robot that cannot make a sound
     /// would make `robotctl quack` lie about which duck answered.
     pub const ROBOT_SOUND: &str = "robot.sound";
+    /// Switch the flashlight — the face's RGB LED — on, off, or over, in a colour. Discrete; send
+    /// as a request. Refused, with a reason, by a board without one (the Zero 3W, the simulator).
+    pub const ROBOT_FLASHLIGHT: &str = "robot.flashlight";
     /// Pick the ToF theremin up, or put it down: the head's depth sensor becomes an
     /// instrument, and the distance of a hand in front of the beak is the pitch — and the
     /// mouth opening, which rises with it, so the note is visible as well as audible.
@@ -620,6 +795,14 @@ pub mod method {
     /// The static geometry [`RobotState::frames`] and [`TofFrame`] are stated in — see
     /// [`ModelResult`]. A read; asked once per session.
     pub const ROBOT_MODEL: &str = "robot.model";
+
+    /// The vet book: the robot's lifetime record — see [`crate::vetbook`]. A read.
+    pub const ROBOT_VETBOOK: &str = "robot.vetbook";
+    /// A dated line of free text in the vet book. Kept for the life of the robot.
+    pub const ROBOT_VETBOOK_NOTE: &str = "robot.vetbookNote";
+    /// Another daemon's counts and records since its last report, for the vet book — see
+    /// [`crate::vetbook::VetbookTallyParams`]. Local daemons only.
+    pub const ROBOT_VETBOOK_TALLY: &str = "robot.vetbookTally";
 
     /// Put a different `.onnx` in one slot, or drop an override and go back to the default.
     ///
@@ -681,6 +864,11 @@ pub mod method {
     pub const ACCOUNT_STATUS: &str = "account.status";
     /// Forget the account. The robot stops being reachable from outside the LAN.
     pub const ACCOUNT_LOGOUT: &str = "account.logout";
+
+    /// Publish the vet book to the signed-in account, as a public dataset, and answer with the
+    /// link to its card — see [`crate::VetbookShareResult`]. Served by `updaterd`, which holds the
+    /// account and the network stack; the book itself comes from `robotd`.
+    pub const VETBOOK_SHARE: &str = "vetbook.share";
 
     /// Turn the connection into a stream of [`ROBOT_STATE`] notifications.
     pub const ROBOT_SUBSCRIBE: &str = "robot.subscribe";
@@ -797,8 +985,10 @@ pub mod method {
     /// One 8×8 depth frame, pushed after [`TOF_STREAM`].
     pub const TOF_FRAME: &str = "tof.frame";
 
-    /// Subscribe to the head IMU (BMI088 on the HAT, same I²C bus as the ToF). The answer
-    /// describes the sensor, then [`HEAD_IMU_FRAME`] notifications arrive until the connection closes.
+    /// Subscribe to the head IMU. Served by `tofd` on `zero3` (the BMI088 on the HAT, same I²C
+    /// bus as the ToF) and by `robotd` on `beta` (the face board's LSM6DSV16X); the other daemon
+    /// answers with `unavailable` naming the right one. The answer describes the sensor, then
+    /// [`HEAD_IMU_FRAME`] notifications arrive until the connection closes.
     pub const HEAD_IMU_STREAM: &str = "head_imu.stream";
 
     /// One head-IMU sample, pushed after [`HEAD_IMU_STREAM`].
@@ -904,6 +1094,8 @@ pub enum Call {
     RobotRelax,
     /// Reboot servos (all of them, or the ids named), then limp. See [`method::ROBOT_REBOOT_MOTORS`].
     RobotRebootMotors(RebootMotorsParams),
+    /// Sit, ease into the rest pose, then torque off and reboot. See [`method::ROBOT_REST`].
+    RobotRest,
     /// Run a one-shot skill, or toggle sit↔stand.
     RobotDo(DoParams),
     /// Standing body pose. Continuous. Send as a notification.
@@ -912,6 +1104,8 @@ pub enum Call {
     RobotMouth(MouthParams),
     /// Play a voice-bank sound.
     RobotSound(SoundParams),
+    /// Switch the flashlight. See [`method::ROBOT_FLASHLIGHT`].
+    RobotFlashlight(FlashlightParams),
     /// Pick the ToF theremin up or put it down. Discrete; the answer is [`ThereminResult`].
     RobotTheremin(ThereminParams),
     /// Start or stop looking for other ducks to sing with. Discrete; the answer is
@@ -934,6 +1128,12 @@ pub enum Call {
     RobotPolicies,
     /// Static robot geometry for a mapper; see [`method::ROBOT_MODEL`].
     RobotModel,
+    /// The lifetime record; see [`method::ROBOT_VETBOOK`].
+    RobotVetbook,
+    /// Write a note in it; see [`method::ROBOT_VETBOOK_NOTE`].
+    RobotVetbookNote(vetbook::VetbookNoteParams),
+    /// Add another daemon's counts to it; see [`method::ROBOT_VETBOOK_TALLY`].
+    RobotVetbookTally(vetbook::VetbookTallyParams),
     /// Load one slot, or reset it; see [`method::ROBOT_LOAD_POLICY`].
     RobotLoadPolicy(LoadPolicyParams),
     /// Re-read every slot from disk; see [`method::ROBOT_RELOAD_POLICIES`].
@@ -962,6 +1162,8 @@ pub enum Call {
     AccountStatus,
     /// Forget the account; see [`method::ACCOUNT_LOGOUT`].
     AccountLogout,
+    /// Publish the vet book; see [`method::VETBOOK_SHARE`].
+    VetbookShare,
     RobotSubscribe(SubscribeParams),
     // ── net.* ────────────────────────────────────────────────────────────────
     NetStatus,
@@ -1005,7 +1207,8 @@ pub enum Call {
     PadInput,
     /// Subscribe to the ToF depth stream. Answered by `tofd`.
     TofStream,
-    /// Subscribe to the head IMU (BMI088 on the HAT); see [`method::HEAD_IMU_STREAM`].
+    /// Subscribe to the head IMU (`tofd` on zero3, `robotd` on beta); see
+    /// [`method::HEAD_IMU_STREAM`].
     HeadImuStream,
 }
 
@@ -1086,10 +1289,12 @@ impl Call {
             Call::RobotInit => method::ROBOT_INIT,
             Call::RobotRelax => method::ROBOT_RELAX,
             Call::RobotRebootMotors(_) => method::ROBOT_REBOOT_MOTORS,
+            Call::RobotRest => method::ROBOT_REST,
             Call::RobotDo(_) => method::ROBOT_DO,
             Call::RobotPose(_) => method::ROBOT_POSE,
             Call::RobotMouth(_) => method::ROBOT_MOUTH,
             Call::RobotSound(_) => method::ROBOT_SOUND,
+            Call::RobotFlashlight(_) => method::ROBOT_FLASHLIGHT,
             Call::RobotTheremin(_) => method::ROBOT_THEREMIN,
             Call::RobotChorale(_) => method::ROBOT_CHORALE,
             Call::ChoraleSubscribe => method::CHORALE_SUBSCRIBE,
@@ -1100,6 +1305,9 @@ impl Call {
             Call::RobotSetMode(_) => method::ROBOT_SET_MODE,
             Call::RobotPolicies => method::ROBOT_POLICIES,
             Call::RobotModel => method::ROBOT_MODEL,
+            Call::RobotVetbook => method::ROBOT_VETBOOK,
+            Call::RobotVetbookNote(_) => method::ROBOT_VETBOOK_NOTE,
+            Call::RobotVetbookTally(_) => method::ROBOT_VETBOOK_TALLY,
             Call::RobotLoadPolicy(_) => method::ROBOT_LOAD_POLICY,
             Call::RobotReloadPolicies => method::ROBOT_RELOAD_POLICIES,
             Call::PolicyCheck => method::POLICY_CHECK,
@@ -1111,6 +1319,7 @@ impl Call {
             Call::AccountLogin(_) => method::ACCOUNT_LOGIN,
             Call::AccountStatus => method::ACCOUNT_STATUS,
             Call::AccountLogout => method::ACCOUNT_LOGOUT,
+            Call::VetbookShare => method::VETBOOK_SHARE,
             Call::RobotSubscribe(_) => method::ROBOT_SUBSCRIBE,
             Call::NetStatus => method::NET_STATUS,
             Call::NetScan => method::NET_SCAN,
@@ -1182,7 +1391,10 @@ impl Call {
                 // `account.status` is a read and stays ungated — a support engineer should be
                 // able to ask which account a robot thinks it belongs to.
                 | Call::AccountLogin(_)
-                | Call::AccountLogout
+                | Call::AccountLogout // Not `vetbook.share`. It changes nothing on the robot, and it publishes under an
+                                      // account root already signed in — with a token the `robot` group can read, so
+                                      // this gate would protect nothing and only put `sudo` in front of a share button.
+                                      // Which transports may carry it is the route tables' decision, not this one.
         )
     }
 
@@ -1248,6 +1460,9 @@ impl Call {
             // Both read or write local state only. `status` is asked on a poll while a login is
             // in flight, so it must not queue behind anything.
             Call::AccountStatus | Call::AccountLogout => (Updater, Prompt),
+            // Three or four round trips to Hugging Face: a repo create and a commit, plus a read
+            // of the book from `robotd` and of the name from `configd`.
+            Call::VetbookShare => (Updater, Slow),
             // Owns its connection until the peer goes away and never reads another request.
             Call::Subscribe => (Updater, Stream),
 
@@ -1258,7 +1473,12 @@ impl Call {
             | Call::RobotRemoteSessionActive
             | Call::RobotPolicies
             | Call::RobotModel
+            | Call::RobotVetbook
             | Call::RobotMode => (Robot, Prompt),
+            // A small write to a file `robotd` already owns, done on the IPC side.
+            Call::RobotVetbookNote(_) => (Robot, Prompt),
+            // A merge into the book under its lock, and nothing else.
+            Call::RobotVetbookTally(_) => (Robot, Prompt),
             // Intents and one-shot skills. All fast: they store a value the control loop reads on
             // its next tick, and none of them waits for the robot to finish anything.
             Call::RobotMove(_)
@@ -1269,10 +1489,12 @@ impl Call {
             | Call::RobotInit
             | Call::RobotRelax
             | Call::RobotRebootMotors(_)
+            | Call::RobotRest
             | Call::RobotDo(_)
             | Call::RobotPose(_)
             | Call::RobotMouth(_)
             | Call::RobotSound(_)
+            | Call::RobotFlashlight(_)
             | Call::RobotTheremin(_)
             | Call::RobotChorale(_)
             | Call::RobotSetMode(_)
@@ -1389,6 +1611,9 @@ impl Call {
             Call::PolicySearch(p) => encode(p),
             Call::AccountLogin(p) => encode(p),
             Call::RobotSound(p) => encode(p),
+            Call::RobotFlashlight(p) => encode(p),
+            Call::RobotVetbookNote(p) => encode(p),
+            Call::RobotVetbookTally(p) => encode(p),
             Call::RobotTheremin(p) => encode(p),
             Call::RobotChorale(p) => encode(p),
             Call::ChoraleBeaconSet(p) => encode(p),
@@ -1414,14 +1639,17 @@ impl Call {
             | Call::RobotStop
             | Call::RobotInit
             | Call::RobotRelax
+            | Call::RobotRest
             | Call::RobotShutdown
             | Call::RobotPolicies
             | Call::RobotModel
+            | Call::RobotVetbook
             | Call::RobotReloadPolicies
             | Call::PolicyCheck
             | Call::DetectorCheck
             | Call::AccountStatus
             | Call::AccountLogout
+            | Call::VetbookShare
             | Call::RobotMode => Value::Object(serde_json::Map::new()),
             Call::NetStatus
             | Call::NetScan
@@ -1475,10 +1703,12 @@ impl Call {
             method::ROBOT_INIT => Call::RobotInit,
             method::ROBOT_RELAX => Call::RobotRelax,
             method::ROBOT_REBOOT_MOTORS => Call::RobotRebootMotors(decode(params)?),
+            method::ROBOT_REST => Call::RobotRest,
             method::ROBOT_DO => Call::RobotDo(decode(params)?),
             method::ROBOT_POSE => Call::RobotPose(decode(params)?),
             method::ROBOT_MOUTH => Call::RobotMouth(decode(params)?),
             method::ROBOT_SOUND => Call::RobotSound(decode(params)?),
+            method::ROBOT_FLASHLIGHT => Call::RobotFlashlight(decode(params)?),
             method::ROBOT_THEREMIN => Call::RobotTheremin(decode(params)?),
             method::ROBOT_CHORALE => Call::RobotChorale(decode(params)?),
             method::CHORALE_SUBSCRIBE => Call::ChoraleSubscribe,
@@ -1489,6 +1719,9 @@ impl Call {
             method::ROBOT_SET_MODE => Call::RobotSetMode(decode(params)?),
             method::ROBOT_POLICIES => Call::RobotPolicies,
             method::ROBOT_MODEL => Call::RobotModel,
+            method::ROBOT_VETBOOK => Call::RobotVetbook,
+            method::ROBOT_VETBOOK_NOTE => Call::RobotVetbookNote(decode(params)?),
+            method::ROBOT_VETBOOK_TALLY => Call::RobotVetbookTally(decode(params)?),
             method::ROBOT_LOAD_POLICY => Call::RobotLoadPolicy(decode(params)?),
             method::ROBOT_RELOAD_POLICIES => Call::RobotReloadPolicies,
             method::POLICY_CHECK => Call::PolicyCheck,
@@ -1500,6 +1733,7 @@ impl Call {
             method::ACCOUNT_LOGIN => Call::AccountLogin(decode(params)?),
             method::ACCOUNT_STATUS => Call::AccountStatus,
             method::ACCOUNT_LOGOUT => Call::AccountLogout,
+            method::VETBOOK_SHARE => Call::VetbookShare,
             method::ROBOT_SUBSCRIBE => Call::RobotSubscribe(decode(params)?),
             method::NET_STATUS => Call::NetStatus,
             method::NET_SCAN => Call::NetScan,
@@ -1628,6 +1862,7 @@ pub mod test_support {
             Call::RobotInit,
             Call::RobotRelax,
             Call::RobotRebootMotors(RebootMotorsParams { ids: vec![3, 11] }),
+            Call::RobotRest,
             Call::RobotDo(DoParams {
                 skill: "ground_pick".into(),
             }),
@@ -1642,10 +1877,23 @@ pub mod test_support {
                 tag: SoundTag::Chirp,
                 hold: None,
             }),
+            Call::RobotFlashlight(FlashlightParams {
+                on: true,
+                toggle: false,
+                color: FlashlightColor::Cyan,
+            }),
             Call::RobotShutdown,
             Call::RobotMode,
             Call::RobotPolicies,
             Call::RobotModel,
+            Call::RobotVetbook,
+            Call::RobotVetbookNote(vetbook::VetbookNoteParams {
+                text: "reglued the beak".into(),
+            }),
+            Call::RobotVetbookTally(vetbook::VetbookTallyParams {
+                tallies: [(vetbook::key::PHOTOS.to_owned(), 1.0)].into(),
+                ..Default::default()
+            }),
             Call::RobotReloadPolicies,
             Call::PolicyCheck,
             Call::PolicyInstall(PolicyInstallParams {
@@ -1666,6 +1914,7 @@ pub mod test_support {
             Call::AccountLogin(AccountLoginParams { force: false }),
             Call::AccountStatus,
             Call::AccountLogout,
+            Call::VetbookShare,
             Call::RobotLoadPolicy(LoadPolicyParams {
                 slot: Some("walk".into()),
                 path: Some("/var/lib/robot/policies/bouncy.onnx".into()),
@@ -2109,6 +2358,46 @@ pub struct SoundParams {
     pub hold: Option<bool>,
 }
 
+/// What the flashlight shows: the seven colours its three on/off channels make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlashlightColor {
+    #[default]
+    White,
+    Red,
+    Green,
+    Blue,
+    Yellow,
+    Cyan,
+    Magenta,
+}
+
+impl FlashlightColor {
+    /// Which of the red, green and blue channels are lit.
+    pub fn channels(self) -> [bool; 3] {
+        match self {
+            FlashlightColor::White => [true, true, true],
+            FlashlightColor::Red => [true, false, false],
+            FlashlightColor::Green => [false, true, false],
+            FlashlightColor::Blue => [false, false, true],
+            FlashlightColor::Yellow => [true, true, false],
+            FlashlightColor::Cyan => [false, true, true],
+            FlashlightColor::Magenta => [true, false, true],
+        }
+    }
+}
+
+/// See [`method::ROBOT_FLASHLIGHT`]. Shaped like [`EnableParams`]: `toggle` wins over `on`, so a
+/// button that does not know the light's state can still flip it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FlashlightParams {
+    pub on: bool,
+    pub toggle: bool,
+    /// The colour it lights in. Ignored when the call switches it off.
+    pub color: FlashlightColor,
+}
+
 /// See [`method::ROBOT_THEREMIN`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2314,6 +2603,31 @@ pub struct PoliciesResult {
     /// show what is loaded.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
+    /// Whether the robot has reached its home pose, or `None` from a robot too old to say.
+    ///
+    /// **A skill is refused while this is false, and the refusal expires on its own.** That makes
+    /// it unlike every other reason `robot.do` says no: "press Start on the pad" is true until a
+    /// human acts, "no skill named …" is true until the config changes, and this one is true for
+    /// about a second. A client cannot tell them apart from `accepted: false` and a sentence, and
+    /// a client that just installed a policy is the one most likely to meet it — `robot.setSkill`
+    /// triggers a reload, a reload sends the robot home, and the `robot.do` that follows is
+    /// refused because of the call before it.
+    ///
+    /// Published here rather than on the 50 Hz stream for the reason `skills` is: it answers a
+    /// question asked once, on the read a client already makes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homed: Option<bool>,
+
+    /// Whether the duck is parked in its seat, or `None` from a robot too old to say.
+    ///
+    /// **"Stand up" is two different calls, and this is how a client tells which.** A duck on its
+    /// feet comes up with `robot.init`. A duck in its seat is held there by the `sit_toggle` latch,
+    /// which the daemon drives itself — `init` argues with that rather than winning, and what ends
+    /// a sit is `robot.do sit_toggle`. A client that guessed would sit a standing duck down every
+    /// other press.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sitting: Option<bool>,
+
     /// Why the last policy change failed, when it was not a change to one slot.
     ///
     /// **A slot's failure is reported on the slot**; this is for the two that name none — a
@@ -2547,6 +2861,22 @@ pub struct Account {
     pub refreshable: bool,
 }
 
+/// Answer to [`Call::VetbookShare`]: where the book went, and the link to show people.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VetbookShareResult {
+    /// The page to share: the card, with buttons to post it. Its preview image is the card, so the
+    /// link unfurls as the card wherever it is pasted.
+    pub url: String,
+    /// The card alone, as a PNG.
+    pub image: String,
+    /// The dataset the book was published to, `<user>/<robot name>-vetbook`.
+    pub dataset: String,
+    /// Which of the cards this share drew, as the Space names it: `notebook`, `purikura`,
+    /// `profile`, `receipt`, `passport`, `gameboy`, `polaroid` or `fifa`.
+    pub card: String,
+}
+
 /// Answer to [`Call::AccountLogout`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountLogoutResult {
@@ -2571,6 +2901,44 @@ pub struct PolicySearchHit {
     pub origin: String,
     pub likes: Option<u64>,
     pub downloads: Option<u64>,
+    /// The one line the publisher wrote about it, from the repo's `manifest.json`.
+    ///
+    /// **Untrusted, and the same field the fetch path already reports.** It is a stranger's
+    /// sentence about a stranger's file, so a client displays it and decides nothing on it. `None`
+    /// covers a repo with no manifest, a manifest with no `description`, and one the robot could
+    /// not read inside the budget a search gets — three things a reader wants the same thing from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// A video of the policy running, as a URL, when the repo carries one.
+    ///
+    /// Picked by file convention rather than declared — `docs/policy-manifest.md` owns the order —
+    /// because that is what publishers already do and what the policy playground already reads.
+    /// A client may link it or play it; nothing on the robot fetches it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+impl PolicySearchHit {
+    /// The lines that go under a hit's own line: what the publisher said, and the clip.
+    ///
+    /// Here rather than in each client because `robotctl` and `duckctl` both print this list, and
+    /// two renderings of the same answer would drift exactly where somebody is comparing one tool
+    /// against the other. What each tool keeps is its own: the id column it pads, and the next
+    /// command it suggests, which is not the same command on the robot as it is over a radio.
+    ///
+    /// **The quotes are load-bearing.** The description is a stranger's sentence about a
+    /// stranger's file, and quoting it is what says the tool is repeating rather than asserting —
+    /// the same shape `policy fetch` prints it in.
+    pub fn details(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(description) = &self.description {
+            lines.push(format!("  \"{description}\""));
+        }
+        if let Some(preview) = &self.preview {
+            lines.push(format!("  {preview}"));
+        }
+        lines
+    }
 }
 
 /// How often a subscriber wants [`method::ROBOT_STATE`].
@@ -2887,6 +3255,40 @@ pub struct HelloResult {
     pub revision: Option<String>,
 }
 
+/// Metadata preceding the binary tail of a local `media.frame` response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaFrameHeader {
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+    pub bytes: usize,
+    pub captured_at_unix_us: u128,
+    /// Degrees clockwise the camera is mounted from upright — the same number `media.video`
+    /// tells a WebRTC peer, and zero when `--flip-in-pipeline` already turned these pixels.
+    ///
+    /// **Carried rather than written down.** The geometry above describes the bytes exactly as
+    /// they are, and a consumer cannot recover the mount from them: a 180° mount is
+    /// indistinguishable from an upright one, and a quarter turn is only a guess from the aspect
+    /// ratio. A recorder building a dataset needs the angle programmatically, and a human
+    /// converting a frame should not have to find a document to learn their picture is sideways.
+    pub rotate: u32,
+}
+impl MediaFrameHeader {
+    /// Bound allocation and reject malformed geometry before decoding pixels.
+    pub fn valid_uyvy(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.width.is_multiple_of(2)
+            && self.format == "UYVY"
+            && matches!(self.rotate, 0 | 90 | 180 | 270)
+            && self.bytes <= 16 * 1024 * 1024
+            && (self.width as usize)
+                .checked_mul(self.height as usize)
+                .and_then(|n| n.checked_mul(2))
+                == Some(self.bytes)
+    }
+}
+
 /// Where an in-flight update has got to. Mirrors the state machine in
 /// `docs/design/updater-design.md` §7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2923,10 +3325,79 @@ pub struct ComponentStatus {
     pub installed: Option<semver::Version>,
     pub phase: Phase,
     /// `None` when no health probe is configured.
+    ///
+    /// `Some(true)` only for a robot that reported healthy. Four different verdicts answer
+    /// `Some(false)` — including *degraded*, which the health gate deliberately **commits** a
+    /// release onto — so this boolean cannot be shown to anyone on its own. Read it with
+    /// [`Self::degraded`] and [`Self::reason`].
     pub healthy: Option<bool>,
+    /// Set when the fault belongs to the board rather than to the installed release.
+    ///
+    /// The same meaning as [`HealthResult::degraded`], and true in exactly the cases the health
+    /// gate would commit — so a bench board with its servo supply off is `healthy: Some(false)`
+    /// with this set, and nothing is wrong with the release it is running.
+    ///
+    /// Sent because it was needed and missing: `robotctl update status` printed `UNHEALTHY` for
+    /// such a board, which is what made a release that had rolled back for an unrelated reason
+    /// look as though the missing policy set had caused it.
+    ///
+    /// Only meaningful when `healthy` is `Some(false)`. Defaults to false, so an older
+    /// `updaterd` that does not send it still reads as the strict verdict it meant.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub degraded: bool,
+    /// The verdict in words: the reason `robotd` gave, or what went wrong in the asking.
+    /// Absent for a healthy robot and for a component with no probe.
+    ///
+    /// Also where the two verdicts the booleans cannot tell apart go — a `robotd` that did not
+    /// answer at all, and one that answered in a shape this `updaterd` cannot parse, which is a
+    /// robot that is very likely fine. Both fail the gate; only this string says which happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub pinned: Option<semver::Version>,
     pub last_attempt: Option<LogEntry>,
+    /// When this component's update source last answered with a manifest that verified, unix
+    /// seconds. `None` on a board where it never has, and from an `updaterd` older than v35.
+    ///
+    /// A robot that cannot reach its source reads exactly like one with nothing to install: the
+    /// scheduled check fails and every other field here stays the same. How long ago the source
+    /// last answered is what shows it. A source replaying an old signed manifest still answers,
+    /// so this does not catch that one; `updater-design.md` §8.4.2 has what would.
+    pub last_checked: Option<i64>,
+    /// The last check of this component's source, answered or not. `None` before the first one
+    /// on this board, and from an `updaterd` older than [`API_CHECK_ATTEMPT`].
+    ///
+    /// What turns an absent [`Self::last_checked`] into one of two things: no attempt yet, which
+    /// is a board that has just started, or attempts that failed, which is the robot that cannot
+    /// reach its source — and the error says why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_check_attempt: Option<CheckAttempt>,
 }
+
+/// One check of an update source: when, and what went wrong if it did not get an answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckAttempt {
+    /// Unix seconds, by the board's clock at the time — which is recorded even when it had not
+    /// synced, unlike [`ComponentStatus::last_checked`], because a clock TLS rejects is one of the
+    /// reasons a check fails.
+    pub at: i64,
+    /// Why the check got no answer: the fetch, the signature or the channel. `None` when it got
+    /// one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The API version [`ComponentStatus::last_checked`] arrived in.
+///
+/// A client needs it to read the absent field, because absent means two opposite things: an
+/// `updaterd` older than this cannot say, and a newer one saying nothing means the source has
+/// never answered on this board — which is the state a robot blocked since first boot is in, and
+/// the one worth warning about. Without the version they are the same silence, and the case the
+/// report exists for is the one that reads as "fine".
+pub const API_LAST_CHECKED: u32 = 35;
+
+/// The API version [`ComponentStatus::last_check_attempt`] arrived in. Read the same way as
+/// [`API_LAST_CHECKED`]: from this version on, absent means no check has run yet.
+pub const API_CHECK_ATTEMPT: u32 = 37;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstalledRelease {
@@ -3211,6 +3682,16 @@ pub struct HealthResult {
     /// Absent off Linux, and on a kernel without thermal sysfs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_temp_c: Option<f64>,
+    /// What the board is allowed to clock at, and how far the thermal governor has wound it
+    /// down. Reported, never judged — same rule as the battery above.
+    ///
+    /// Travels beside [`Self::cpu_temp_c`] because the temperature alone does not say what the
+    /// heat is costing: a board sitting at 95 °C has already been cut to a fraction of its
+    /// clock, and a duck walking badly at that point is short of CPU, not short of policy.
+    ///
+    /// Absent off Linux, and on a kernel with no `cpufreq` sysfs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_throttle: Option<CpuThrottle>,
     /// The control loop's own numbers — the ones `healthy` was decided from.
     ///
     /// Carried so a verdict can be *checked* rather than taken on faith. "unhealthy: control
@@ -3252,7 +3733,7 @@ pub struct LoopHealth {
 /// `#[serde(default)]` for the reason spelled out on [`ImuHealth`], and it applies here even more
 /// plainly: these are failure counters whose zero the doc comments below already call meaningful.
 /// An older `robotd` that omits one is saying "no failures", not "unknown".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BusHealth {
     /// Consecutive failed reads; any success resets it. One is ordinary on a serial bus,
@@ -3262,6 +3743,32 @@ pub struct BusHealth {
     /// commanded anything and is still waiting for a robot to answer — the signature of
     /// servo power being off.
     pub startup_failures: u32,
+    /// While waiting: the expected servo IDs ([`JOINT_IDS`]) that did not answer the last ping
+    /// round, in that table's order. Empty once the bus is up, before the first round, and when
+    /// the port itself would not open. All fifteen is servo power off; some of them is servos
+    /// unplugged, and naming them is the point.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub missing: Vec<u8>,
+}
+
+impl BusHealth {
+    /// Whether some servos answer and these do not — a robot that is there, with parts of it
+    /// missing, as opposed to no robot at all.
+    pub fn partly_missing(&self) -> bool {
+        !self.missing.is_empty() && self.missing.len() < JOINT_IDS.len()
+    }
+
+    /// The missing servos as people read them: `32 head_yaw, 33 head_roll`.
+    pub fn describe_missing(&self) -> String {
+        self.missing
+            .iter()
+            .map(|&id| match joint_of(id) {
+                Some(joint) => format!("{id} {joint}"),
+                None => id.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// The IMU board, which rides the motor bus.
@@ -3299,6 +3806,12 @@ pub struct ImuHealth {
     /// `sync_read` — so the bus reports no error and `ready` stays true — and repeats itself on
     /// every tick, which makes the run climb without bound. See [`ImuHealth::frozen`].
     pub consecutive_stale_blocks: u64,
+    /// While the bus is coming up: every servo answered its ping and the IMU board did not.
+    /// `robotd` waits rather than run without orientation, so this is also why it is not
+    /// ticking. Cleared once the bus is up; never set at runtime, where a board that stops
+    /// answering shows as consecutive bus read failures instead.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
 }
 
 impl ImuHealth {
@@ -3318,6 +3831,44 @@ impl ImuHealth {
     /// warning that fires on a healthy robot is a warning nobody reads.
     pub fn frozen(&self) -> bool {
         self.consecutive_stale_blocks >= Self::FROZEN_RUN
+    }
+}
+
+/// How hard the board is being clocked down, and what it is being clocked down to.
+///
+/// Two readings of one thing, because either alone is half an answer. The level is the thermal
+/// governor's own action — it says *heat* is the cause — but it is an index into a frequency
+/// table, so "6 of 6" tells nobody what the robot lost. The ceiling is what it lost, in the
+/// units the board is specified in, but a low ceiling can also be a userspace policy rather
+/// than heat. Together they say both, and disagreeing (`level: 0` under a lowered ceiling) is
+/// itself the useful reading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CpuThrottle {
+    /// The cpufreq cooling device's current state: 0 is unthrottled, `max_level` is as far down
+    /// as the governor can go.
+    pub level: u32,
+    /// The deepest state that device has, so `level` means something without the reader
+    /// knowing the board. Zero when no cpufreq cooling device was found — the ceiling below is
+    /// then the whole answer.
+    pub max_level: u32,
+    /// What the CPU may currently clock to, in kHz — the kernel's `scaling_max_freq`, not the
+    /// instantaneous frequency. The instantaneous one is mostly a statement about how busy the
+    /// board is; this is a statement about what it is *allowed* to do.
+    pub khz: u32,
+    /// What it could clock to cold, in kHz — `cpuinfo_max_freq`.
+    pub max_khz: u32,
+}
+
+impl CpuThrottle {
+    /// Is anything holding the clock down?
+    ///
+    /// Either reading counts. The governor having wound the level up is the ordinary case, and
+    /// a ceiling below the hardware maximum with the level still at zero is the other one —
+    /// somebody pinned it from userspace, which is worth seeing rather than hiding because the
+    /// thermal governor was not the one who did it.
+    pub fn throttled(&self) -> bool {
+        self.level > 0 || (self.max_khz > 0 && self.khz < self.max_khz)
     }
 }
 
@@ -3344,6 +3895,17 @@ pub struct MotorThermal {
 pub struct Battery {
     pub volts: f64,
     pub percent: f64,
+}
+
+impl Battery {
+    /// The percentages a reading is coloured at, by every client that shows one.
+    ///
+    /// Not display taste: 0% is `duck_control::model::BATTERY_EMPTY_V`, which is the voltage at
+    /// which `robotd` sits the robot down and cuts power. The percentage is a countdown to that,
+    /// so the last fifth of it is worth seeing from across a room. Here rather than in a client,
+    /// so `robotctl monitor` and `duckctl udp-pad` cannot disagree about the same pack.
+    pub const LOW_PCT: f64 = 30.0;
+    pub const CRITICAL_PCT: f64 = 15.0;
 }
 
 /// Answer to a discrete intent — [`Call::RobotStop`], [`Call::RobotEnable`].
@@ -3411,6 +3973,48 @@ pub struct RobotState {
     pub joints: Vec<f64>,
     /// What was commanded, so a viewer can show tracking error rather than guessing at it.
     pub targets: Vec<f64>,
+    /// Measured joint velocities, rad/s, indexed as [`JOINT_NAMES`].
+    ///
+    /// Read in the same twelve-byte block as [`Self::joints`] — `present_pwm`,
+    /// `present_current`, `present_velocity`, `present_position` are contiguous at register 124,
+    /// so the control loop already has this every tick at no extra bus cost. It stopped at the
+    /// wire only because nothing had asked for it.
+    ///
+    /// Differencing [`Self::joints`] between frames is not the same thing: a subscriber
+    /// decimated to 10 Hz differences across five ticks, and any dropped frame silently
+    /// becomes a velocity spike.
+    ///
+    /// `default` so a frame from a `robotd` predating this field still parses, on the same rule
+    /// as [`Self::odom`]. Empty means *not reported*, which is not the same as a robot at rest —
+    /// a client must not render it as zero velocity.
+    ///
+    /// Three things make it empty, and nothing on the wire tells them apart: a daemon older
+    /// than v36; a backend with nothing to measure — `--fake` has no servos, and a simulator
+    /// may send no load for [`Self::currents_ma`]; and `[control] publish_velocity_and_load =
+    /// false` in `robotd.toml`, which is how an operator takes the bytes off the stream. All
+    /// three say the same thing — this robot is not telling you — and none of them is a zero.
+    /// (v36)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub velocities: Vec<f64>,
+    /// Present current magnitude per joint, mA, indexed as [`JOINT_NAMES`].
+    ///
+    /// Magnitude, not a signed current: the sign is dropped in the bus driver
+    /// (`duck_control::bus`, the `.abs()` on the present-current word), not in the control
+    /// loop and not here. What a consumer wants is load, and load is what this is.
+    ///
+    /// **Direction is not recoverable from [`Self::velocities`].** That works while a joint is
+    /// moving, and the cases this field exists for are the still ones: a joint holding a squat,
+    /// a foot taking weight and a hand pressing on the beak are all near-zero velocity at
+    /// non-zero current, where a push and a pull read alike. Wanting the direction of an
+    /// external force is a reason to carry the sign, not something to derive downstream.
+    ///
+    /// This is the robot's only measure of external force. Those three, and a servo on its way
+    /// to latching its overload shutdown, are visible here and nowhere else on this wire.
+    ///
+    /// Same `default` rule as [`Self::velocities`], and the same three ways of being empty:
+    /// empty is *not reported*, never zero load. (v36)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub currents_ma: Vec<f64>,
     /// Where contact odometry believes the robot is. `default` so a frame from
     /// a `robotd` predating the estimator still parses — zeros, like a robot
     /// that has not moved.
@@ -3475,9 +4079,13 @@ pub struct PoseState {
 pub struct FramesState {
     pub camera: PoseState,
     pub tof: PoseState,
-    /// The head IMU (BMI088) in the trunk frame. The `head_imu.stream` samples are in the IMU's
-    /// own tilted axes; this pose (sensor→trunk, from the same head FK) is how a consumer rotates
+    /// The head IMU in the trunk frame. The `head_imu.stream` samples are in the IMU's own
+    /// tilted axes; this pose (sensor→trunk, from the same head FK) is how a consumer rotates
     /// them into the trunk/camera frame. Absent from a daemon predating it. (v24)
+    ///
+    /// **The mount is the `zero3` HAT's BMI088.** The kinematic model has no `beta` face board
+    /// yet, so on a `beta` this pose does not describe its LSM6DSV16X until the model gains that
+    /// mount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_imu: Option<PoseState>,
 }
@@ -3587,6 +4195,13 @@ pub struct SafetyState {
     /// requested gain when it decides the robot has fallen, and that override was invisible.
     #[serde(default)]
     pub gain: Option<u16>,
+    /// Somebody is holding the robot: the pick-up detector (`[pickup]`) has paused the policy
+    /// and the legs hold the pause pose until it is put back down. A state of the robot, like
+    /// `fallen`, rather than a policy — while it is true `policy` reads `held`.
+    ///
+    /// Absent from a `robotd` that predates the detector, which reads as never picked up.
+    #[serde(default)]
+    pub picked_up: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -3741,6 +4356,19 @@ pub struct SystemInfoResult {
     /// to its hostname for a name.
     pub serial: Option<String>,
     pub uptime_seconds: u64,
+    /// This robot is a duck in MuJoCo, not a duck on a desk.
+    ///
+    /// **One fact, declared once, so nothing downstream has to infer it.** `mediad` puts it in the
+    /// `meta` it registers with, so a simulated duck is marked as such in its owner's robot list
+    /// rather than sitting there looking like hardware somebody could walk over to; `robotctl`
+    /// says it too. The alternative was every client deciding for itself from a serial that starts
+    /// with `sim-`, which is a convention three places would have to agree on and one of them
+    /// would get wrong.
+    ///
+    /// `serde(default)` for the reason every field here has it: an older daemon does not send it,
+    /// and absent means a real robot — which is right for every robot built so far.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub simulated: bool,
 }
 
 /// Answer to [`Call::SystemSetName`].
@@ -4024,7 +4652,7 @@ pub struct SkillsResult {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PadBindParams {
-    /// `"a"`, `"x"`, `"lb"`, `"rb"` or `"dpad_down"`. A string for the reason a slot is one: a
+    /// `"a"`, `"b"`, `"x"`, `"y"`, `"lb"` or `"rb"`. A string for the reason a slot is one: a
     /// button this build does not have should be refused with the list of ones it does.
     pub button: String,
     /// Three states in one field, the same shape [`LoadPolicyParams`] uses for a path.
@@ -4425,7 +5053,8 @@ pub struct TofFrame {
 #[serde(default)]
 pub struct HeadImuStreamResult {
     pub accepted: bool,
-    /// The IMU that answered, e.g. `BMI088`. `None` when there is none — see `unavailable`.
+    /// The IMU that answered: `BMI088` (zero3) or `LSM6DSV16X` (beta). `None` when there is
+    /// none — see `unavailable`, which also names the daemon to ask when it is not this one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sensor: Option<String>,
     /// Why there is no IMU: not fitted, bus unreadable, chip-id mismatch.
@@ -4437,7 +5066,9 @@ pub struct HeadImuStreamResult {
 
 /// One head-IMU sample — a [`method::HEAD_IMU_FRAME`] notification.
 ///
-/// The BMI088 on the HAT, read by `tofd` (it owns that I²C bus). All values are in the IMU's own
+/// Which chip and which daemon is the board's: on `zero3` the BMI088 on the HAT, read by `tofd`
+/// (it owns that I²C bus) with a Madgwick fusion; on `beta` the face board's LSM6DSV16X, read by
+/// `robotd`, its quaternion fused on the chip (SFLP game vector). All values are in the IMU's own
 /// axes, which are tilted relative to the head/camera — the mount is not axis-aligned. To place a
 /// sample in the trunk/camera frame, rotate it by [`FramesState::head_imu`] (the sensor→trunk
 /// pose the kinematics compute for this tick). This is the head IMU, distinct from the body IMU
@@ -4451,13 +5082,13 @@ pub struct HeadImuFrame {
     pub at_us: u64,
     /// `CLOCK_MONOTONIC` when the sample was read, ns — the clock [`RobotState::t_ns`] shares.
     pub t_ns: u64,
-    /// Angular velocity, rad/s, in the BMI088's own (tilted) sensor axes — NOT the head or
+    /// Angular velocity, rad/s, in the chip's own (tilted) sensor axes — NOT the head or
     /// camera frame. Combine with [`FramesState::head_imu`] (the sensor→trunk pose from the
     /// kinematics) to place it. See that field.
     pub gyro: [f32; 3],
-    /// Specific force, m/s², BMI088 sensor axes.
+    /// Specific force, m/s², the chip's sensor axes.
     pub accel: [f32; 3],
-    /// Madgwick orientation, scalar-first `[w, x, y, z]`, sensor→world (gravity down, yaw
+    /// Orientation, scalar-first `[w, x, y, z]`, sensor→world (gravity down, yaw
     /// arbitrary). The world here is the IMU's own; relate it to the trunk via the mount pose.
     pub quat: [f32; 4],
     /// Chip temperature, °C.
@@ -4907,6 +5538,74 @@ pub fn read_camera_stats() -> Option<CameraStats> {
     serde_json::from_slice(&std::fs::read(camera_stats_path()).ok()?).ok()
 }
 
+/// What `mediad`'s relay is doing with the rendezvous service, published for `robotctl` to read.
+///
+/// A file for [`CameraStats`]' reasons. It exists because "is my robot in the central's list, and
+/// under which account" had no answer short of reading `mediad`'s journal — and the usual wrong
+/// answer is a robot registered perfectly well under an account other than the one looking.
+///
+/// Times are Unix seconds on the robot's clock, which is the clock `robotctl` reads them against.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteStatus {
+    /// The service's base URL, so a reader can tell the shipped rendezvous from a test one.
+    pub service: String,
+    /// When [`RemoteStatus::link`] last changed *kind* — a heartbeat does not move it.
+    pub since: i64,
+    #[serde(flatten)]
+    pub link: RemoteLink,
+}
+
+/// Where the relay is in its loop, with only the facts each state has.
+///
+/// An enum with data rather than a state plus optional fields, so a registration without a peer id,
+/// or a retry without a reason, cannot be written.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RemoteLink {
+    /// No account token on disk: reachable on its own network only. The ordinary state of a robot
+    /// nobody has signed in.
+    SignedOut,
+    /// A token, and a connection being opened with it.
+    Connecting,
+    /// In the service's listing.
+    #[serde(rename_all = "camelCase")]
+    Registered {
+        /// The account the service resolved the token to — the one whose robot list this robot is
+        /// in. `None` when the welcome did not say.
+        account: Option<String>,
+        peer_id: String,
+        /// The last lease refresh the service accepted. A value that stops moving is a relay that
+        /// has stopped, whatever `state` says.
+        last_heartbeat: i64,
+    },
+    /// The service refused the token. A new login is what fixes it; the relay waits for one.
+    Refused,
+    /// The last connection ended and another is coming.
+    Retrying { reason: String },
+}
+
+/// Where `mediad` publishes [`RemoteStatus`].
+pub fn remote_status_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/run/mediad/remote.json")
+}
+
+/// Publish [`RemoteStatus`] at `path`. Never fatal: a robot that cannot describe its connection is
+/// still connected.
+pub fn publish_remote_status(path: &std::path::Path, status: &RemoteStatus) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut json = serde_json::to_vec(status).map_err(|e| e.to_string())?;
+    json.push(b'\n');
+    std::fs::write(path, json).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// What `mediad` published about its relay, or `None` — not running, `--no-remote`, or too old.
+pub fn read_remote_status() -> Option<RemoteStatus> {
+    serde_json::from_slice(&std::fs::read(remote_status_path()).ok()?).ok()
+}
+
 /// What one daemon published, or `None` if it published nothing.
 ///
 /// `None` covers both "not running" — systemd removes the directory with the unit — and "too old to
@@ -4956,7 +5655,8 @@ macro_rules! log_startup_identity {
 /// "monotonic" means. Nanoseconds. `monotonic` is `CLOCK_MONOTONIC` — what
 /// [`RobotState::t_ns`] and [`TofFrame::t_ns`] carry; `realtime` is `CLOCK_REALTIME`, the
 /// clock RTCP sender reports are stated in, read together in `media.video` so a peer can
-/// relate the two.
+/// relate the two. Unix only: no daemon runs anywhere else.
+#[cfg(unix)]
 pub mod clock {
     fn read(clock: libc::clockid_t) -> u64 {
         let mut ts = libc::timespec {
@@ -5127,7 +5827,7 @@ mod tests {
     fn every_call_covers_every_variant() {
         assert_eq!(
             every_call().len(),
-            67,
+            73,
             "a Call variant was added or removed — update every_call() and this count"
         );
     }
@@ -5708,35 +6408,7 @@ mod tests {
     /// the field where the docs say it is.
     #[test]
     fn the_theremin_block_is_absent_until_there_is_a_theremin() {
-        let mut state = RobotState {
-            t: 1.5,
-            t_ns: 0,
-            imu: None,
-            frames: None,
-            skeleton: Vec::new(),
-            movement: MoveState {
-                requested: [0.0; 3],
-                applied: [0.0; 3],
-                limited_by: Vec::new(),
-            },
-            head: [0.0; 4],
-            policy: "stand".into(),
-            safety: SafetyState {
-                fallen: false,
-                limp: false,
-                gravity: [0.0, 0.0, -1.0],
-                gain: Some(200),
-            },
-            control_loop: LoopState {
-                hz: 50.0,
-                missed: 0,
-            },
-            joints: vec![0.0; 15],
-            targets: vec![0.0; 15],
-            odom: OdomState::default(),
-            theremin: None,
-            chorale: None,
-        };
+        let mut state = a_state();
         let down = serde_json::to_string(&state).unwrap();
         assert!(!down.contains("theremin"), "{down}");
 
@@ -5769,34 +6441,16 @@ mod tests {
     /// in either rename is invisible in Rust and breaks every consumer, so pin the JSON.
     #[test]
     fn robot_state_uses_the_documented_field_names() {
+        // Only the fields this test is about; everything else is `a_state()`'s business, so
+        // the next field added to `RobotState` does not have to be typed out again here.
         let state = RobotState {
-            t: 1.5,
-            t_ns: 0,
-            imu: None,
-            frames: None,
-            skeleton: Vec::new(),
             movement: MoveState {
                 requested: [0.4, 0.0, 0.0],
                 applied: [0.15, 0.0, 0.0],
                 limited_by: vec!["deadman".into()],
             },
-            head: [0.0; 4],
             policy: "walk".into(),
-            safety: SafetyState {
-                fallen: false,
-                limp: false,
-                gravity: [0.0, 0.0, -1.0],
-                gain: Some(200),
-            },
-            control_loop: LoopState {
-                hz: 49.8,
-                missed: 0,
-            },
-            joints: vec![0.0; 15],
-            targets: vec![0.0; 15],
-            odom: OdomState::default(),
-            theremin: None,
-            chorale: None,
+            ..a_state()
         };
 
         let line = serde_json::to_string(&Request::notify_state(&state)).unwrap();
@@ -5809,6 +6463,103 @@ mod tests {
         let back: Request = serde_json::from_str(&line).unwrap();
         assert!(back.is_notification(), "state carries no id");
         assert_eq!(back.as_state().unwrap(), state);
+    }
+
+    /// Velocity and load must reach the wire under the names the docs promise, and must
+    /// survive a round trip. They are the only measurements of joint motion and external
+    /// force this protocol carries; a rename here is silent in Rust and leaves every
+    /// consumer reading nothing.
+    #[test]
+    fn velocity_and_load_ride_under_their_documented_names() {
+        let mut state = a_state();
+        // Distinguishable, and distinguishable *from each other* — a swap of the two blocks
+        // would otherwise round-trip happily.
+        state.velocities = (0..15).map(|i| i as f64 * 0.1).collect();
+        state.currents_ma = (0..15).map(|i| 100.0 + i as f64).collect();
+
+        let line = serde_json::to_string(&Request::notify_state(&state)).unwrap();
+        assert!(line.contains(r#""velocities":"#), "{line}");
+        assert!(line.contains(r#""currents_ma":"#), "{line}");
+
+        let back = serde_json::from_str::<Request>(&line)
+            .unwrap()
+            .as_state()
+            .unwrap()
+            .clone();
+        // Compared approximately, on this protocol's own rule that exact equality is not a
+        // comparison to offer about a measurement (see `SafetyState`, which drops `Eq` for
+        // exactly this reason). A JSON round trip is not bit-exact for every f64.
+        let close = |a: &[f64], b: &[f64], what: &str| {
+            assert_eq!(a.len(), b.len(), "{what}: length");
+            for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                assert!((x - y).abs() < 1e-9, "{what}[{i}]: {x} vs {y}");
+            }
+        };
+        close(&back.velocities, &state.velocities, "velocities");
+        close(&back.currents_ma, &state.currents_ma, "currents_ma");
+    }
+
+    /// A `robotd` predating these fields sends a frame without them, and a client must be able
+    /// to tell *not reported* from *reported as zero*. A robot at rest and a robot that cannot
+    /// tell you what it is doing look nothing alike, and rendering one as the other is how a
+    /// dashboard says "no load" about a servo cooking itself.
+    ///
+    /// The same rule `odom` established, applied to two more blocks.
+    #[test]
+    fn an_older_frame_reports_no_velocity_rather_than_zero() {
+        let line = serde_json::to_string(&Request::notify_state(&a_state())).unwrap();
+        assert!(
+            !line.contains("velocities") && !line.contains("currents_ma"),
+            "empty blocks must not be serialised at all: {line}"
+        );
+
+        let back = serde_json::from_str::<Request>(&line)
+            .unwrap()
+            .as_state()
+            .unwrap()
+            .clone();
+        assert!(back.velocities.is_empty(), "absent is not a vec of zeros");
+        assert!(back.currents_ma.is_empty(), "absent is not a vec of zeros");
+    }
+
+    /// A minimal frame: everything present, nothing interesting.
+    ///
+    /// The one place a full [`RobotState`] is spelled out in this module. A test that cares
+    /// about two fields overrides those two — `RobotState { policy: "walk".into(), ..a_state() }`
+    /// — so an additive field is one line here rather than one line per test.
+    fn a_state() -> RobotState {
+        RobotState {
+            t: 1.5,
+            movement: MoveState {
+                requested: [0.0; 3],
+                applied: [0.0; 3],
+                limited_by: Vec::new(),
+            },
+            head: [0.0; 4],
+            policy: "stand".into(),
+            safety: SafetyState {
+                fallen: false,
+                limp: false,
+                gravity: [0.0, 0.0, -1.0],
+                gain: Some(200),
+                picked_up: false,
+            },
+            control_loop: LoopState {
+                hz: 49.8,
+                missed: 0,
+            },
+            joints: vec![0.0; 15],
+            targets: vec![0.0; 15],
+            velocities: Vec::new(),
+            currents_ma: Vec::new(),
+            odom: OdomState::default(),
+            theremin: None,
+            chorale: None,
+            t_ns: 0,
+            imu: None,
+            frames: None,
+            skeleton: Vec::new(),
+        }
     }
 
     /// An unlimited command must not carry an empty array — a consumer checking
@@ -5878,6 +6629,10 @@ mod tests {
         assert!(
             !imu.frozen(),
             "a default run must never look like a dead IMU"
+        );
+        assert!(
+            !imu.missing,
+            "and an older robotd never claims the board is gone"
         );
     }
 
@@ -6140,6 +6895,46 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<HelloResult>(&line).unwrap(),
             released
+        );
+    }
+
+    /// Both clients print a hit through this, so the contract is here rather than in either of
+    /// them: quoted description, bare URL, and nothing at all for what the publisher did not say.
+    #[test]
+    fn a_hit_renders_only_what_the_publisher_wrote() {
+        let bare = PolicySearchHit {
+            id: "someone/microduck-thing".into(),
+            origin: "community".into(),
+            ..Default::default()
+        };
+        assert!(bare.details().is_empty());
+
+        let described = PolicySearchHit {
+            description: Some("Bows from a stand.".into()),
+            ..bare.clone()
+        };
+        assert_eq!(described.details(), vec!["  \"Bows from a stand.\""]);
+
+        let both = PolicySearchHit {
+            preview: Some("https://huggingface.co/a/b/resolve/main/media/preview.mp4".into()),
+            ..described
+        };
+        assert_eq!(
+            both.details(),
+            vec![
+                "  \"Bows from a stand.\"",
+                "  https://huggingface.co/a/b/resolve/main/media/preview.mp4",
+            ]
+        );
+
+        // A clip and no sentence is an ordinary repo, not a shape to special-case.
+        let silent = PolicySearchHit {
+            preview: Some("https://huggingface.co/a/b/resolve/main/preview.mp4".into()),
+            ..bare
+        };
+        assert_eq!(
+            silent.details(),
+            vec!["  https://huggingface.co/a/b/resolve/main/preview.mp4"]
         );
     }
 }

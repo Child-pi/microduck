@@ -148,19 +148,19 @@ targets and none of them can send one. That is the borrow checker, not a convent
 transactions per tick, plus a third once a second:
 
 ```text
-read()          one sync_read  · IMU board + 15 servos · registers 124–136   (§2.1)
+read()          one fast sync_read · IMU board + 15 servos · regs 124–136   (§2.1)
 decide          observation → policy → targets → clamp                 (§2.2–§2.4)
-write()         one sync_write · goal positions
+write()         one sync_write     · goal positions
 publish         atomics always; a state frame only if someone subscribed     (§4.1)
 
-every 1 s       slow_sensors() · registers 144–146 · voltage + temperature   (§2.1)
+every 1 s       slow_sensors()     · registers 144–146 · voltage + temperature (§2.1)
 ```
 
 Where the data goes, once per period:
 
 ```text
   Dynamixel bus
-       │  one sync_read: IMU board + 15 servos, one transaction
+       │  one fast sync_read: IMU board + 15 servos, one transaction
        ▼
    Sensors ──────────┬──────────────────────► safety.observe ──► fallen? (debounced)
    joints, IMU       │
@@ -260,7 +260,7 @@ intended:
 
 ### 2.1 The bus layer and `RobotIo`
 
-A thin layer over `rustypot`: open, one combined `sync_read`, `sync_write` goal positions,
+A thin layer over `rustypot`: open, one combined fast `sync_read`, `sync_write` goal positions,
 torque enable, gains, the slow sensor read, and the startup register check. Written fresh
 rather than lifted, but **the numbers are borrowed from the runtime**, each with a comment
 saying so:
@@ -271,8 +271,15 @@ saying so:
   load-bearing — at the XL330 default of 250 that is 500 µs of turnaround per device, so
   sixteen devices cost ~8 ms per tick, 40% of the budget. A servo that was factory-reset or
   swapped in arrives at 250, so the check is what removes a whole class of "why is it slow on
-  this robot". `shutdown = 52` is the error mask that latches on overload, overheating and
-  input-voltage faults.
+  this robot". `shutdown = 52` is `0b110100` — overload, electrical shock, overheating — with
+  the input-voltage bit **clear**, where the factory's 53 sets it. That bit is what clears
+  torque once the supply passes the servo's `Max Voltage Limit`, which nothing here writes and
+  which therefore stays at its default 7.0 V. A charged 2S pack sits above that, so the clear
+  bit is what lets this bus run the pack's range across a servo rated to 6.0 V. Read as
+  "latches on input-voltage faults" it says the opposite of what it does. Alongside them,
+  `homing_offset` is −512 on the knees (13, 23) and 0 everywhere else, the values from the
+  runtime's `setup_motor_rpi.py` flashing rig. Every pose and policy assumes the knees carry that
+  offset, and a servo straight from the box does not.
 - **A swapped-in servo is adopted, not configured by hand.** A new XL330 answers as ID 1 at
   57 600 baud, and neither is used on this bus. So before the register check, `open_bus` pings
   the fifteen expected IDs; if *exactly one* is silent, it looks for ID 1 — first at 1 Mbps,
@@ -306,6 +313,35 @@ A silent servo does not produce a short answer: `rustypot`'s `sync_read` waits f
 fails the whole transaction if one does not reply. So both reads are all-or-nothing, and the
 caller keeps its previous sample rather than treating one miss as news.
 
+**Every sync read is a fast sync read** (protocol 2.0 instruction 0x8A), enabled once on the
+controller so the tick's combined read, the slow read and the startup position read all use it
+without naming it. The instruction packet is a plain sync read's; what changes is the answer.
+Instead of sixteen status packets, each with its ten-byte protocol 2.0 header and each preceded
+by that device's turnaround, the devices append their blocks to **one** status packet from the
+broadcast id. The bus turns around once per tick rather than sixteen times, which is the same
+cost `return_delay_time = 0` above exists to hold down — the register check still matters,
+because every other transaction on this bus is an ordinary one that pays it per device.
+
+It is the same all-or-nothing shape, for a new reason: the blocks arrive in one packet, so a
+device whose firmware does not implement 0x8A simply does not answer and the read times out
+rather than coming back short. **XL330 firmware must be v46 or newer**, and the `imu_to_dxl`
+board — `id 200`, the first block in the tick's read — has to implement it too.
+
+That is firmware, not software, and it is the one thing on this bus the daemon cannot talk its
+way out of — so it is `bus.fast_sync_read`, **on by default**, rather than a constant. Off, every
+sync read is a plain one and the robot behaves exactly as it did before the instruction was used
+at all; `open_bus` says so once in the journal, because otherwise a robot running the slow path
+is indistinguishable from a slow robot.
+
+The default is the brave one because getting it wrong is unambiguous rather than subtle. A device
+that does not implement 0x8A does not answer at all, so *every* read times out — not some of them
+returning something plausible. The loop reports bus drops from its first tick, `min_achieved_hz`
+(§3.4) sees an unhealthy robot, and a release that turned this on against firmware that cannot do
+it rolls itself back. A robot that predates the firmware needs one key set, once, by whoever
+notices; there is no version negotiation here and no probe at startup, because a device that does
+not answer looks exactly like one that is unpowered and a probe would have to tell those apart
+before it could say anything useful.
+
 **Board temperature is a third source, and not on the bus at all.** The hottest of the SoC's
 thermal zones, read from `sysfs` in the same once-a-second sample (`robotd/src/soc.rs`). It
 lives in `robotd` rather than `duck-control` because it is a property of the Linux board, not
@@ -314,6 +350,20 @@ precisely when it earns its place: a board cooking behind a blocked vent and a r
 servos are the same symptom until you can see both numbers. The maximum across zones rather
 than one zone by name, so a board that wires its sensors differently cannot silently omit the
 one that was climbing.
+
+**And what the heat is costing, which the temperature does not say.** The same sample reads the
+clock ceiling — `scaling_max_freq` against `cpuinfo_max_freq` — and the cpufreq cooling device's
+state. A Radxa Zero 3 at 95 °C is not merely warm: the thermal governor has already pinned it to
+408 MHz of 1800, under a quarter of the CPU the gaits were tuned on, and a duck walking badly on
+a hot board is walking badly *because of that*. The temperature alone reads as a robot somebody
+should keep an eye on; the pair says the robot is already impaired.
+
+Both readings, because either alone is half an answer. The cooling state names heat as the cause
+but is an index into a frequency table, so "6 of 6" says nothing about what was lost; the ceiling
+is what was lost but can also be a userspace policy. The worst cluster and the deepest cpufreq
+cooler win, for the same reason the hottest zone does — a big.LITTLE board throttles its big
+cores first, and reporting `policy0` there would show a board running freely while the cores the
+loop is on are halved.
 
 **IMU staleness is tracked, permanently.** "The read succeeded but the board handed back the
 same sample" feeds dead orientation to the policy, is invisible unless someone counts it, and
@@ -416,6 +466,36 @@ divergence: the prototype tracks the standing action scale by saving and restori
 `action_scale` across transitions, which can leave a stale value behind after a sit→stand cycle
 until the next walk; here scale and gain are recomputed from the active state every tick.
 
+**One move at a time, and none from the seat.** A ground pick, a skill, a sit or a rise is
+refused while any other is in flight — including the glide down into the seat — and only
+standing up is accepted from a seated robot. The one request a running skill takes is one for
+itself when it chains, which is the button being held. This is a second divergence: the
+prototype let a pick preempt a kick's tail and a roulade roll out of a kick or the seat, each a
+network handed a pose it was not trained from.
+
+The seat survives a deliberate stop and nothing else. Disabling the policy ends the move in
+flight and, on a seated robot, holds the seat where it is rather than sending the standing home
+pose, which a sitting robot can only reach by going over backwards; `robot.init` on a seated
+robot holds it too. A relax or a servo reboot forgets the seat and every move with it, so the
+next bring-up starts from a standing robot's state, as after a boot.
+
+**The robot is looked at twice** (`robotd/src/posture.rs`). When torque comes on, a robot that
+reads seated ramps to the seat — the sitstand policy's own trained SIT keyframe — instead of
+straight-legged to the standing home pose, which pulls it out of the seat and over backwards.
+And once per enable, before the policy takes over, because the ramp is open-loop: a robot that
+started folded can end it standing, sat back on its seat or on its back. That second look is
+taken even over a seat the controller already believes in. A seated verdict then runs the same
+sequence as a rise while the robot drives — the sitstand network holds the seat for its settle
+time, then rises — with its previous action and low-pass seeded from the held seat rather than
+zeroed: rising on the first tick, cold, from a seat the network had not chosen, went visibly
+worse than the same rise mid-session. The verdict comes from the trunk's height above the feet — the
+feet sites through the kinematic model, turned into the world by the IMU — and the trunk's tilt.
+Seated, the sitstand network rises first; standing, lying down (tilt past 45°) or in between,
+the gait takes over as it always has. The check picks how the policy starts, never whether: a
+Start is the person deciding the robot should drive. The
+height is the signal because the joint angles are not: three recorded seats with little in common
+joint by joint all read 15–39 % of standing height.
+
 Policy files come from paths in the params file, defaulting into the release directory — so a
 normal update carries the policy trained against the binary, and a dev points a path at their
 own `.onnx` and iterates without cutting a release.
@@ -500,8 +580,8 @@ a robot lying on its side, and the wrong one for softening a landing: gravity pa
 `fall_gravity_z` held for 200 ms *is* the robot on the floor, and the window worth acting in
 has closed by then.
 
-So `limp_fall` (on by default since it was validated on a robot) runs a second, separate
-detector — `duck_control::fall` — on the rate rather than the position. Projected gravity
+So `limp_fall` (on by default; with the default velstand gait and no standing network, the
+hand-back is to velstand at zero command) runs a second, separate detector — `duck_control::fall` — on the rate rather than the position. Projected gravity
 rotates with the trunk, so `ġ = −ω × g` is exact and comes straight from the gyro in the same
 12-byte IMU block; extrapolating it over ~0.3 s says where gravity is heading. It fires when
 the robot is already tilted (≈26°), still tipping over rather than recovering, and predicted
@@ -525,6 +605,52 @@ on the floor like any other tick.
 The tuning is the feature, and it is asymmetric: a false positive is a fall the robot
 *caused*, which is worse than the stiff landing it was trying to avoid. The defaults sit
 deliberately on the late side.
+
+#### 2.4.2 Being held is a fourth
+
+A policy has no idea its feet have left the floor. Picked up mid-walk, it keeps stepping, and the
+legs thrash in the hand until somebody presses Start — which is also the only way to get a robot
+that will hold still to be carried. `[pickup]` (on by default) notices instead: a small classifier,
+`duck_control::pickup`, reads the last second of what the loop already reads — gyro, projected
+gravity, joint positions and velocities, the target it commanded the tick before — and scores how
+likely it is that a hand is carrying the robot. Over 0.8 for 100 ms pauses the policy; under 0.35
+for 80 ms, once the pause is 300 ms old, hands it back.
+
+Paused is `driving` false (§1.4), like the limp-fall: the controller is not stepped, the targets
+come from the pause, and they reach the motors through `apply` with no exemption. The pause ramps
+from the policy's last target to a **pause pose** over 300 ms at the policy gain, and resuming is
+the ordinary rising edge of `driving`, so the controller is reset on the way back in. The pose is not
+home: home at walking gain is a balanced pose only for a policy that keeps balancing it, and in
+simulation a robot holding it on the floor tips past 40° within a second or two. The pause pose is
+the walking policy's own mean standing stance, which tips far more slowly and is the stance the
+policy expects to wake up in. That is also why resuming is the fast side of the band: a robot set
+down while paused is holding a fixed pose on the floor, and the sooner the policy has it back the
+less often it tips (in simulation, 3 % of set-downs at a 0.18 s median resume, 12 % at 0.30 s).
+
+It watches only the walking and standing networks in walk mode. A skill, a sit, the limp-fall, a
+disable or the shutdown sit owns the robot outright; any of them ends a pause and empties the
+window, and the next verdict waits for a full second of fresh history — the model was only shown
+complete windows, and one padded at startup paused a simulated robot a tenth of a second after
+boot. Roller mode is not watched at all: the model has never seen wheels.
+
+The model is trained entirely in simulation, in `microduck_rl` (`pickup/`, `scripts/pickup_*.py`):
+the deployed velstand walks, stands and falls under the training randomisation while a simulated
+hand — a mocap body welded softly to the trunk or the head — lifts, carries, holds it at any
+orientation including upside down, spins it, shakes it, sets it down and drops it. (The first
+model's hand only gripped the trunk and only passed through large tilts; on the robot it missed a
+duck lifted by the head and resumed when the duck was turned 180°.) The feature layout, the pause pose and the hysteresis timings
+are fixed there, which is why they are constants in `duck_control::pickup` and only the two
+thresholds are params: changing the rest here without retraining is the silent kind of wrong. The
+row carries servo current, but the shipped model drops it before its first layer — in simulation
+it separated held from standing far better than it does on a real robot. On the board the classifier
+costs a few tenths of a millisecond a tick (`cargo run --release -p duck-control --example
+pickup-bench` measures it there, next to a policy inference). The file ships in the release
+(`models/pickup_detector.onnx`), because its input is this loop's own layout and a model from
+another release is the wrong shape in a way no load check sees.
+
+Off means off: no model is opened and nothing is scored or recorded. A model that will not load is
+a warning rather than unhealthy, and a detector that errors mid-run lets go of any pause and starts
+over — it must never be what strands a robot paused.
 
 A spent pack is the other thing that moves the robot without being asked: with
 `safety.battery_empty_shutdown` (on by default), reaching the empty floor on the smoothed
@@ -606,6 +732,15 @@ from constants of its own, which is how the same pack shows two different number
 screens. A client drawing a battery pill should not have to know which pack this robot ships
 with. There is no fuel gauge: the measurement is the servos' own supply voltage (§2.1), so it
 sags under load and recovers at rest.
+
+**The span is a statement about the rail, and it holds because the rail *is* the pack** — the
+servos are fed the 2S battery, not a regulated 5 V, which is why the span runs from 6.6 to
+8.2 V across a servo whose own rating is 3.7–6.0 V. That does not make the two disagree: the
+servo's `Max Voltage Limit` is not written by anything here (§2.1), and the `shutdown` mask
+clears the input-voltage bit that would otherwise latch torque off above it, so a charged pack
+runs. A servo on a bench supply is answering the same question about a different rail — 5 V
+lands under 6.6 V and maps to 0%, which is the mapping working as defined rather than a fault
+to chase. Regulation would be a different robot, and these constants move with it.
 
 Same payload for `robotctl monitor` and, later, the app. This is what replaces the runtime's
 180-byte frame on 9870, the JPEG stream on 9871, the UDP command socket on 9872, the maploc
@@ -696,7 +831,7 @@ robot.
 
 | method | answer |
 |---|---|
-| `robot.health` | **the loop is meeting its deadline** — from achieved rate and missed-deadline count — plus a description of the robot the verdict never consults: loop, bus, IMU, battery, servo and board temperature |
+| `robot.health` | **the loop is meeting its deadline** — from achieved rate and missed-deadline count — plus a description of the robot the verdict never consults: loop, bus, IMU, battery, servo and board temperature, and the board's clock ceiling |
 | `robot.safeToRestart` | false while the policy is enabled and the robot is moving |
 | `robot.modelApi` | constant |
 | `robot.remoteSessionActive` | `false` — `mediad` owns the real answer |
@@ -711,10 +846,13 @@ distinction real is why the control loop was built before anything that walks (�
 **What may and may not reach the verdict.** `healthy` and `degraded` are the update system's
 inputs, so only conditions a *release* can be blamed for may set them — that is what `degraded`
 already exists to enforce for an unpowered bench board. Everything else on the answer is a
-**description**, and no automatic decision may read it: battery, motor temperature, and the
-loop/bus/IMU counters. Gating on the battery would mean a robot updated on a low pack rolls the
-release back, then judges its replacement on the same low pack, and cannot be updated at all until
-someone works out why. Motor temperature would do the same on a hot afternoon.
+**description**, and no automatic decision may read it: battery, motor and board temperature, the
+clock ceiling, and the loop/bus/IMU counters. Gating on the battery would mean a robot updated on
+a low pack rolls the release back, then judges its replacement on the same low pack, and cannot be
+updated at all until someone works out why. Motor temperature would do the same on a hot
+afternoon, and a throttled clock on a robot that had got warm once — which is the strongest case
+of the three, since the release that would fix the heat is the one the gate would refuse to
+keep.
 
 **Why they travel together anyway.** One method, because the question arrives once: a robot
 behaving oddly gets asked "what is going on", and a verdict without the numbers behind it just
@@ -782,9 +920,31 @@ A TOML file read at startup and, for the most part, **not watched**. It lives ou
 `/etc/robot/robotd.toml`.
 
 Two parts of it are watched, and both are exceptions earned by what a restart would cost rather
-than steps towards watching the whole file. `padd` stats the file once a second and re-reads
-`[pad]` and `[pad_imu_head_control]` when the mtime moves: a binding is changed from a phone, and restarting
-`padd` to apply it would drop the pad session and let `robotd`'s deadman zero a walking robot.
+than steps towards watching the whole file. Whichever pad daemon runs — `padd`, or `netpadd`
+for the pad over UDP — stats the file once a second and re-reads the controller sections
+(`[pad]`, `[pad_imu_head_control]`, `[pad_drive]`, `[pad_axes]`, `[pad_head]`, `[pad_body]` and
+`[pad_roller]`) when the mtime moves: a binding is changed from a phone, and restarting the
+daemon to apply it would drop the pad session and let `robotd`'s deadman zero a walking robot.
+Both read them through `pad-map`'s `Config::reload`, so the two cannot map a pad differently.
+The sections are replaced together after validation; a failed live read keeps the mapping in
+use. At startup, a missing or invalid file uses the built-in defaults.
+
+`[pad_axes]` selects logical gilrs axes (`left_x`, `left_y`, `right_x`, `right_y`, `none`) for
+robot commands, separately for `drive`, `head`, `head_drive` and `body_pose`. Each binding has
+`source`, `invert` and a nonnegative `gain`; omitted fields inherit the mode's shipped binding,
+including its sign. Values below `deadzone` are zeroed without rescaling the remaining travel,
+then inverted, multiplied by gain, clamped to ±1, and scaled to physical command limits.
+`none` or gain zero disables a binding. Limits live in `[pad_drive]` (walking m/s and rad/s),
+`[pad_roller]` (the same on wheels), `[pad_head]` (per-joint radians) and `[pad_body]` (height metres
+and tilt radians). Defaults reproduce the previous commands, including asymmetric crouch and
+roller push/brake. These are requested commands, not actuator limits or guarantees that a policy
+can reach the requested pose.
+
+D-pad mode selection and Start/Select holds remain fixed. With IMU head control active,
+`head_drive` uses the `drive` stick bindings while tilt drives the head through `[pad_head]` limits.
+Smoothing remains in `robotd`'s `[control]` settings. `--deadzone` and `--max-head`, on either
+daemon, override the corresponding file settings for bench use.
+
 `robotd` re-reads `[policy]` — all of it but `mode` and `enabled` — when asked to, which is how
 `robotctl policy add` lands a skill without taking motor control away from a standing robot.
 Re-reading `[safety]` or `[control]` under a running loop is a different and much larger promise,
@@ -844,7 +1004,7 @@ arithmetic, it was that nothing read the answer.
 
 ### 4.5 What else the loop drives, and why none of it has a design page
 
-`robotd` grew four subsystems after slice 2 that are not control and not safety. They share a
+`robotd` grew five subsystems after slice 2 that are not control and not safety. They share a
 shape: each hangs off the tick, none may block it, and none can reach the bus except through the
 intents the loop already arbitrates.
 
@@ -854,9 +1014,10 @@ intents the loop already arbitrates.
 | `theremin.rs` | depth from `tofd` at 15 Hz → a note, a mouth opening, and a line of state, sampled by the 50 Hz loop and never waited on | the module header |
 | `chorale.rs` | several ducks singing one piece: the lowest id conducts, the conductor owns the seating, `btd` carries the beacons and does no thinking | the module header |
 | `pet-detect/` | a ~20 KB CNN over a 40-band log-mel window from the onboard mic, in its own worker | the crate header |
+| `vetbook.rs` | the robot's lifetime record: a tally the tick adds to without a lock, handed to the shared book once a second with `try_lock`, saved atomically once a minute; plus a 1-byte read of each servo's latched alerts every 10 s | the module header, and `duck_ipc_proto::vetbook` for the record |
 
-Plus `soc.rs`, which reads the board's own thermal zones out of `sysfs` — not behind `RobotIo`,
-because it has to keep answering when the motor bus does not.
+Plus `soc.rs`, which reads the board's own thermal zones and clock ceiling out of `sysfs` — not
+behind `RobotIo`, because it has to keep answering when the motor bus does not.
 
 **None of them has a design page, and that is the rule working rather than a gap.** A service earns
 one when a second reader would otherwise have to derive its contract from the code

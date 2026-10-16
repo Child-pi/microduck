@@ -127,6 +127,9 @@ pub struct Server {
     /// must stay answerable *during* one — `account.status` is polled while a login is in
     /// flight, and queueing that behind a download would make a wizard look stuck.
     account: Arc<crate::account::Account>,
+
+    /// Where `vetbook.share` asks for the book and the robot's name.
+    vetbook: crate::vetbook::Sources,
 }
 
 impl Server {
@@ -136,6 +139,24 @@ impl Server {
 
     /// As [`Self::new`], with uids/gids permitted to mutate beyond the owning uid.
     pub fn with_policy(engine: Engine, allow_uids: Vec<u32>, allow_gids: Vec<u32>) -> Self {
+        Self::with_policy_at(
+            engine,
+            allow_uids,
+            allow_gids,
+            PathBuf::from(crate::account::DEFAULT_PATH),
+        )
+    }
+
+    /// [`Self::with_policy`], with the account credential somewhere other than a robot's.
+    ///
+    /// The simulator, where the daemons run as a person and `/etc/robot` is not writable. See
+    /// [`crate::account::account_at`].
+    pub fn with_policy_at(
+        engine: Engine,
+        allow_uids: Vec<u32>,
+        allow_gids: Vec<u32>,
+        token_path: PathBuf,
+    ) -> Self {
         let (progress_tx, _) = broadcast::channel(PROGRESS_BUFFER);
         Self {
             engine: Arc::new(Mutex::new(engine)),
@@ -146,8 +167,15 @@ impl Server {
             allow_uids,
             allow_gids,
             forced_owner_uid: None,
-            account: Arc::new(crate::account::account()),
+            account: Arc::new(crate::account::account_at(token_path)),
+            vetbook: crate::vetbook::Sources::default(),
         }
+    }
+
+    /// Where `vetbook.share` finds `robotd` and `configd`, when not at their default sockets.
+    pub fn with_vetbook_sources(mut self, sources: crate::vetbook::Sources) -> Self {
+        self.vetbook = sources;
+        self
     }
 
     /// Point the account at a token file and a Hugging Face of your choosing.
@@ -675,6 +703,12 @@ impl Server {
                 Ok(was) => Response::ok(Some(id), &crate::account::logout_result(was)),
                 Err(e) => Response::err(Some(id), crate::Error::from(e).to_rpc_error()),
             },
+            // No engine lock, like the account: it reads two daemons and talks to the Hub, and
+            // touches nothing an update owns.
+            Call::VetbookShare => match crate::vetbook::share(&self.account, &self.vetbook).await {
+                Ok(result) => Response::ok(Some(id), &result),
+                Err(e) => Response::err(Some(id), e.to_rpc_error()),
+            },
 
             // Read-only and no engine lock: asking the Hub what exists changes nothing here.
             Call::PolicySearch(params) => match crate::policy::search(&params.query).await {
@@ -770,8 +804,10 @@ impl Server {
             | Call::RobotInit
             | Call::RobotRelax
             | Call::RobotRebootMotors(_)
+            | Call::RobotRest
             | Call::RobotDo(_)
             | Call::RobotSound(_)
+            | Call::RobotFlashlight(_)
             | Call::RobotPose(_)
             | Call::RobotMouth(_)
             | Call::RobotTheremin(_)
@@ -784,6 +820,9 @@ impl Server {
             | Call::RobotSetMode(_)
             | Call::RobotPolicies
             | Call::RobotModel
+            | Call::RobotVetbook
+            | Call::RobotVetbookNote(_)
+            | Call::RobotVetbookTally(_)
             | Call::RobotLoadPolicy(_)
             | Call::RobotReloadPolicies
             | Call::RobotSubscribe(_) => Response::err(
@@ -846,7 +885,7 @@ impl Server {
                 Some(id),
                 proto::Error::new(
                     proto::code::METHOD_NOT_FOUND,
-                    "tof.stream and head_imu.stream are served by tofd itself, on /run/tofd/tof.sock",
+                    "tof.stream is served by tofd, on /run/tofd/tof.sock; head_imu.stream by tofd on a zero3 and by robotd (/run/robotd.sock) on a beta",
                 ),
             ),
 

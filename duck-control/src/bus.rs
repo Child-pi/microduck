@@ -4,6 +4,12 @@
 //! `sync_write` of goal positions. The IMU is listed first so it answers before the servo
 //! burst.
 //!
+//! Every sync read here is a **fast** sync read (protocol 2.0 instruction 0x8A): the devices
+//! append their answers to one status packet from the broadcast id instead of each sending
+//! its own, which drops fifteen packet headers and fifteen bus turnarounds from the tick.
+//! `bus.fast_sync_read` in `robotd.toml` turns it off for a robot whose devices do not
+//! implement the instruction. See [`open_controller`].
+//!
 //! Battery and thermals are the one thing that does not fit that shape: they live at registers
 //! outside the block the tick fetches, so [`RobotIo::slow_sensors`] is a transaction of its
 //! own, meant to be called about once a second rather than every tick.
@@ -21,7 +27,7 @@ use crate::imu::{IMU_BLOCK_LEN, SflpDecoder};
 use crate::io::{ImuStale, IoError, JointTargets, Result, RobotIo, Sensors, SlowSensors};
 use crate::model::{
     BAUD_RATE, EXPECTED_REGISTERS, FACTORY_BAUD_RATE, FACTORY_ID, IMU_DXL_ID, JOINT_IDS,
-    JOINT_NAMES, NUM_JOINTS,
+    JOINT_NAMES, NUM_JOINTS, homing_offset,
 };
 
 /// Start of the contiguous block read every tick: `present_pwm`, `present_current`,
@@ -43,6 +49,13 @@ const RAD_PER_SEC_PER_COUNT: f64 = 0.229 * (2.0 * PI / 60.0);
 /// bus time than the two transactions do.
 const SLOW_READ_ADDR: u8 = 144;
 const SLOW_READ_LEN: u8 = 3;
+
+/// `hardware_error_status`, one byte — see [`RobotIo::hardware_errors`].
+const HARDWARE_ERROR_ADDR: u8 = 70;
+
+/// `model_number` (0, `u16`) through `firmware_version` (6, `u8`): seven bytes, once a start.
+const IDENTITY_ADDR: u8 = 0;
+const IDENTITY_LEN: u8 = 7;
 
 /// `present_input_voltage` counts 0.1 V each.
 const VOLTS_PER_COUNT: f64 = 0.1;
@@ -106,6 +119,10 @@ pub struct DynamixelIo {
     port: String,
     /// IMU first, then the servos in [`JOINT_IDS`] order — the order blocks come back in.
     ids: Vec<u8>,
+    /// Kept for the same reason as `port`: [`Self::reopen`] builds a new controller, and one
+    /// built without this would silently drop back to a plain sync read for the rest of the
+    /// process — a motor swap quietly halving the tick's bus budget.
+    fast_sync_read: bool,
     imu: SflpDecoder,
     /// Blocks identical to their predecessor. The read succeeded but the board handed back
     /// the same sample, which means the policy is being fed dead orientation data — a
@@ -114,8 +131,10 @@ pub struct DynamixelIo {
 }
 
 impl DynamixelIo {
-    pub fn open(port: &str) -> Result<Self> {
-        let controller = open_controller(port, BAUD_RATE)?;
+    /// Open the bus. `fast_sync_read` is `bus.fast_sync_read` from `robotd.toml` — see
+    /// [`open_controller`] for what it costs to have wrong.
+    pub fn open(port: &str, fast_sync_read: bool) -> Result<Self> {
+        let controller = open_controller(port, BAUD_RATE, fast_sync_read)?;
 
         let mut ids = Vec::with_capacity(NUM_JOINTS + 1);
         ids.push(IMU_DXL_ID);
@@ -125,9 +144,17 @@ impl DynamixelIo {
             controller,
             port: port.to_owned(),
             ids,
+            fast_sync_read,
             imu: SflpDecoder::default(),
             stale_imu: StaleImuTracker::default(),
         })
+    }
+
+    /// The body IMU's sensor→trunk mount, which is the robot's ([`SflpDecoder::DEFAULT_MOUNT`]
+    /// for a `zero3`, [`SflpDecoder::BETA_MOUNT`] for a `beta`). Starts the decoder afresh, so
+    /// call it right after [`Self::open`], before the first read.
+    pub fn set_imu_mount(&mut self, mount: [f64; 4]) {
+        self.imu = SflpDecoder::new(mount);
     }
 
     /// Assert — and correct — the EEPROM registers the control loop depends on.
@@ -180,6 +207,34 @@ impl DynamixelIo {
             std::thread::sleep(EEPROM_SETTLE);
             fixed += 1;
         }
+
+        // An EEPROM register like the others, so it is written only with torque off, which is how
+        // a servo powers up and how a fresh one is adopted.
+        let want = homing_offset(id);
+        let got = *self
+            .controller
+            .read_homing_offset(id)
+            .map_err(|e| IoError::Bus(format!("read homing_offset on {id}: {e}")))?
+            .first()
+            .ok_or(IoError::ShortRead {
+                what: "register read",
+                expected: 1,
+                got: 0,
+            })?;
+        if got != want {
+            tracing::warn!(
+                id,
+                register = "homing_offset",
+                got,
+                want,
+                "correcting motor register"
+            );
+            self.controller
+                .write_homing_offset(id, want)
+                .map_err(|e| IoError::Bus(format!("write homing_offset on {id}: {e}")))?;
+            std::thread::sleep(EEPROM_SETTLE);
+            fixed += 1;
+        }
         Ok(fixed)
     }
 
@@ -201,6 +256,17 @@ impl DynamixelIo {
             }
         }
         Ok(missing)
+    }
+
+    /// Does the IMU board answer a ping?
+    ///
+    /// Asked apart from [`Self::missing_servos`] because the census covers servos only, and a
+    /// silent IMU board otherwise surfaces as the first [`RobotIo::read`] failing — which, from
+    /// outside, looks exactly like no robot at all.
+    pub fn imu_answers(&mut self) -> Result<bool> {
+        self.controller
+            .ping(IMU_DXL_ID)
+            .map_err(|e| IoError::Bus(format!("ping imu {IMU_DXL_ID}: {e}")))
     }
 
     /// Flash a factory-fresh servo so it takes the place of the one that is missing.
@@ -319,7 +385,7 @@ impl DynamixelIo {
     /// — one with no port, never used — standing in while the real one is dropped.
     fn reopen(&mut self, baud: u32) -> Result<()> {
         self.controller = Xl330Controller::new();
-        self.controller = open_controller(&self.port, baud)?;
+        self.controller = open_controller(&self.port, baud, self.fast_sync_read)?;
         Ok(())
     }
 
@@ -397,7 +463,25 @@ impl DynamixelIo {
 }
 
 /// The serial port at `baud`, wrapped in a Protocol 2 controller.
-fn open_controller(port: &str, baud: u32) -> Result<Xl330Controller> {
+///
+/// `with_fast_sync_read` routes every `sync_read_*` through instruction 0x8A, so it covers
+/// the tick's combined read, [`RobotIo::slow_sensors`] and [`DynamixelIo::present_positions`]
+/// without any of them naming it. The saving is a packet header and a turnaround — the
+/// device's `return_delay_time`, which [`EXPECTED_REGISTERS`] pins low precisely because it
+/// is paid per device — for each of the sixteen devices on the bus.
+///
+/// It is all or nothing: one status packet carries every block, so a device whose firmware
+/// does not implement 0x8A does not answer and the whole read times out. That is the same
+/// shape of failure a silent servo already causes on a plain sync read, and the tick coasts
+/// over a dropped read either way. XL330 firmware needs to be v46 or newer, and the
+/// `imu_to_dxl` board is `id 200` on this bus and has to implement it too — which is a
+/// property of a robot's hardware and the reason `fast_sync_read` is a setting at all rather
+/// than something this code decides.
+///
+/// Nothing here probes for support. A device that does not answer looks exactly like one that
+/// is unpowered, and a startup probe would have to tell those apart to say anything useful —
+/// so the answer is a key someone turns off, not a guess this code makes every boot.
+fn open_controller(port: &str, baud: u32, fast_sync_read: bool) -> Result<Xl330Controller> {
     let serial = serialport::new(port, baud)
         .timeout(READ_TIMEOUT)
         .open()
@@ -405,9 +489,13 @@ fn open_controller(port: &str, baud: u32) -> Result<Xl330Controller> {
             path: port.to_owned(),
             source: std::io::Error::other(e),
         })?;
-    Ok(Xl330Controller::new()
-        .with_protocol_v2()
-        .with_serial_port(serial))
+    let controller = Xl330Controller::new().with_protocol_v2();
+    let controller = if fast_sync_read {
+        controller.with_fast_sync_read()
+    } else {
+        controller
+    };
+    Ok(controller.with_serial_port(serial))
 }
 
 /// Which servo a factory-fresh one should become, given the IDs that did not answer.
@@ -586,6 +674,49 @@ impl RobotIo for DynamixelIo {
 
     fn imu_stale(&self) -> ImuStale {
         self.stale_imu.stale
+    }
+
+    fn hardware_errors(&mut self) -> Result<Option<[u8; NUM_JOINTS]>> {
+        let blocks = self
+            .controller
+            .sync_read_raw_data(&JOINT_IDS, HARDWARE_ERROR_ADDR, 1)
+            .map_err(|e| IoError::Bus(format!("hardware_error_status sync_read: {e}")))?;
+        if blocks.len() != NUM_JOINTS {
+            return Err(IoError::ShortRead {
+                what: "hardware error blocks",
+                expected: NUM_JOINTS,
+                got: blocks.len(),
+            });
+        }
+        let mut errors = [0u8; NUM_JOINTS];
+        for (slot, block) in errors.iter_mut().zip(&blocks) {
+            *slot = block.first().copied().unwrap_or(0);
+        }
+        Ok(Some(errors))
+    }
+
+    fn servo_identity(&mut self) -> Result<Option<[crate::io::ServoIdentity; NUM_JOINTS]>> {
+        let blocks = self
+            .controller
+            .sync_read_raw_data(&JOINT_IDS, IDENTITY_ADDR, IDENTITY_LEN)
+            .map_err(|e| IoError::Bus(format!("model/firmware sync_read: {e}")))?;
+        if blocks.len() != NUM_JOINTS {
+            return Err(IoError::ShortRead {
+                what: "identity blocks",
+                expected: NUM_JOINTS,
+                got: blocks.len(),
+            });
+        }
+        let mut ids = [crate::io::ServoIdentity::default(); NUM_JOINTS];
+        for (slot, block) in ids.iter_mut().zip(&blocks) {
+            if block.len() == IDENTITY_LEN as usize {
+                *slot = crate::io::ServoIdentity {
+                    model: u16::from_le_bytes([block[0], block[1]]),
+                    firmware: block[6],
+                };
+            }
+        }
+        Ok(Some(ids))
     }
 
     fn imu_ready(&self) -> bool {
