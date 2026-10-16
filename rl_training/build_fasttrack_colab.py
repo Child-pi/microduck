@@ -2,6 +2,24 @@
 """Builds Microduck_FastTrack_Colab.ipynb with continuous training until 20s+ survival and biomimetic duck motion, fully compatible with all Gymnasium wrappers."""
 
 import json
+import os
+import io
+import tarfile
+import base64
+
+_CURR_DIR = os.path.dirname(os.path.abspath(__file__))
+_buf = io.BytesIO()
+with tarfile.open(fileobj=_buf, mode="w:gz", compresslevel=9) as _tar:
+    for _rel in [
+        "envs/__init__.py",
+        "envs/microduck_env.py",
+        "requirements_colab.txt",
+        "checkpoints/microduck_endurance_10s_champion.zip",
+    ]:
+        _full = os.path.join(_CURR_DIR, _rel)
+        if os.path.exists(_full):
+            _tar.add(_full, arcname=_rel)
+_EMBEDDED_CORE_B64 = base64.b64encode(_buf.getvalue()).decode("ascii")
 
 notebook = {
     "nbformat": 4,
@@ -52,7 +70,7 @@ notebook = {
             "source": [
                 "## 步驟 1：從 GitHub 自動下載專案資產與模型\n",
                 "\n",
-                "執行下方單元格，直接由 `Child-pi/microduck-private` 的 `rl-locomotion` 分支拉取完整強化學習環境與 3D 模型檔案。"
+                "執行下方單元格，直接由 `Child-pi/microduck-private` 的 `rl-locomotion` 分支拉取完整強化學習環境與 3D 模型檔案（若 `GITHUB_TOKEN` 過期或未設定，亦支援自動從官方公開庫與內建核心包無縫組裝，絕不卡住！）。"
             ]
         },
         {
@@ -63,13 +81,17 @@ notebook = {
             "source": [
                 "import os\n",
                 "import sys\n",
-                "import getpass\n",
+                "import io\n",
+                "import base64\n",
+                "import tarfile\n",
+                "import shutil\n",
                 "\n",
                 "REPO_OWNER = \"Child-pi\"\n",
                 "REPO_NAME = \"microduck-private\"\n",
                 "BRANCH = \"rl-locomotion\"\n",
                 "REPO_ROOT = \"/content/microduck\"\n",
                 "PROJECT_DIR = \"/content/microduck/rl_training\"\n",
+                "os.environ[\"GIT_TERMINAL_PROMPT\"] = \"0\"\n",
                 "\n",
                 "github_token = None\n",
                 "try:\n",
@@ -80,41 +102,25 @@ notebook = {
                 "except Exception:\n",
                 "    pass\n",
                 "\n",
-                "if not github_token:\n",
-                "    github_token = getpass.getpass(\"請輸入您的 GitHub Personal Access Token (Private Repo 下載需要，若已公開可直接按 Enter): \").strip()\n",
-                "\n",
                 "if github_token:\n",
                 "    clone_url = f\"https://{REPO_OWNER}:{github_token}@github.com/{REPO_OWNER}/{REPO_NAME}.git\"\n",
-                "else:\n",
-                "    clone_url = f\"https://github.com/{REPO_OWNER}/{REPO_NAME}.git\"\n",
+                "    print(f\"📥 正在從 GitHub 下載專案 ({REPO_NAME} @ {BRANCH})...\")\n",
+                "    if not os.path.exists(REPO_ROOT):\n",
+                "        !git clone -b {BRANCH} --depth 1 {clone_url} {REPO_ROOT} 2>/dev/null || true\n",
+                "    else:\n",
+                "        !cd {REPO_ROOT} && git fetch origin {BRANCH} 2>/dev/null && git reset --hard origin/{BRANCH} 2>/dev/null || true\n",
                 "\n",
-                "print(f\"📥 正在從 GitHub 下載專案 ({REPO_NAME} @ {BRANCH})...\")\n",
-                "if not os.path.exists(REPO_ROOT):\n",
-                "    !git clone -b {BRANCH} --depth 1 {clone_url} {REPO_ROOT}\n",
-                "else:\n",
-                "    print(\"📁 專案目錄已存在，正在強制拉取最新更新...\")\n",
-                "    !cd {REPO_ROOT} && git fetch origin {BRANCH} && git reset --hard origin/{BRANCH}\n",
+                "# 確保最新 16 小鴨核心環境、官方 v8 獎勵與預訓練權重永遠就緒 (無須擔心 Token 過期)\n",
+                "os.makedirs(PROJECT_DIR, exist_ok=True)\n",
+                f"_CORE_B64 = \"{_EMBEDDED_CORE_B64}\"\n",
+                "with tarfile.open(fileobj=io.BytesIO(base64.b64decode(_CORE_B64)), mode=\"r:gz\") as _t:\n",
+                "    _t.extractall(PROJECT_DIR)\n",
                 "\n",
-                "# 若 Colab Secrets 中的 GITHUB_TOKEN 已過期，自動從 Google Drive 備份包還原或提示更新 Token\n",
-                "if not os.path.exists(PROJECT_DIR):\n",
-                "    print(\"⚠️ GitHub Token 認證未通過或已過期，嘗試從 Google Drive 專屬備份包自動還原專案環境...\")\n",
-                "    try:\n",
-                "        from google.colab import drive\n",
-                "        if not os.path.exists(\"/content/drive/MyDrive\"):\n",
-                "            drive.mount(\"/content/drive\", force_remount=False)\n",
-                "        bundle_path = \"/content/drive/MyDrive/microduck_rl_backup/rl_training_bundle.tar.gz\"\n",
-                "        if os.path.exists(bundle_path):\n",
-                "            os.makedirs(REPO_ROOT, exist_ok=True)\n",
-                "            !tar -xzf {bundle_path} -C {REPO_ROOT}\n",
-                "            print(\"✅ 已成功從 Google Drive 備份包還原完整專案與 16 小鴨訓練環境！\")\n",
-                "    except Exception as e:\n",
-                "        print(f\"Drive 還原提示: {e}\")\n",
-                "\n",
-                "if not os.path.exists(PROJECT_DIR):\n",
-                "    github_token = getpass.getpass(\"🔑 請輸入新的有效 GitHub Personal Access Token: \").strip()\n",
-                "    if github_token:\n",
-                "        clone_url = f\"https://{REPO_OWNER}:{github_token}@github.com/{REPO_OWNER}/{REPO_NAME}.git\"\n",
-                "        !git clone -b {BRANCH} --depth 1 {clone_url} {REPO_ROOT}\n",
+                "if not os.path.exists(os.path.join(PROJECT_DIR, \"models\", \"scene_walk.xml\")):\n",
+                "    print(\"🌐 正在從 Pollen Robotics 官方公開庫同步 3D 機器人模型與 STL 網格資產...\")\n",
+                "    !git clone --depth 1 https://github.com/pollen-robotics/microduck_rl.git /tmp/official_microduck_rl\n",
+                "    shutil.copytree(\"/tmp/official_microduck_rl/src/mjlab_microduck/robot/microduck\", os.path.join(PROJECT_DIR, \"models\"), dirs_exist_ok=True)\n",
+                "    shutil.rmtree(\"/tmp/official_microduck_rl\", ignore_errors=True)\n",
                 "\n",
                 "# 清理既有模組快取以確保載入最新環境程式碼\n",
                 "for mod in list(sys.modules.keys()):\n",
@@ -125,7 +131,7 @@ notebook = {
                 "    sys.path.append(PROJECT_DIR)\n",
                 "\n",
                 "os.chdir(PROJECT_DIR)\n",
-                "print(f\"\\n✅ 專案目錄就緒：{os.getcwd()}\")\n",
+                "print(f\"\\n✅ 專案目錄與官方 v8 16 小鴨環境就緒：{os.getcwd()}\")\n",
                 "!ls -lh"
             ]
         },
@@ -287,15 +293,8 @@ notebook = {
                 "\n",
                 "policy_kwargs = dict(net_arch=dict(pi=[256, 128, 64], vf=[256, 128, 64]))\n",
                 "\n",
-                "# [Skill: isolate-project-workspace] 自動掛載並雙向同步 Google Drive 專屬備份目錄\n",
+                "# [Skill: isolate-project-workspace] 若已掛載 Google Drive，自動雙向同步專屬備份目錄 (不主動彈出阻塞式 OAuth 視窗)\n",
                 "GDRIVE_BACKUP_DIR = \"/content/drive/MyDrive/microduck_rl_backup\"\n",
-                "try:\n",
-                "    from google.colab import drive\n",
-                "    if not os.path.exists(\"/content/drive/MyDrive\"):\n",
-                "        drive.mount(\"/content/drive\", force_remount=False)\n",
-                "except Exception:\n",
-                "    pass\n",
-                "\n",
                 "os.makedirs(\"checkpoints\", exist_ok=True)\n",
                 "if os.path.exists(f\"{GDRIVE_BACKUP_DIR}/checkpoints\"):\n",
                 "    print(\"☁️ 發現 Google Drive 備份目錄，正在還原頂級權重...\")\n",
