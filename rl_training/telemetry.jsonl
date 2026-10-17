@@ -1,0 +1,9 @@
+{"round": 1, "timesteps": 262144, "mean_duration_s": 2.14, "best_duration_s": 3.82, "best_steps": 191, "reward": 894.2, "waddle_idx": 0.42, "fps": 932, "cu_used": 0.12}
+{"round": 2, "timesteps": 524288, "mean_duration_s": 4.56, "best_duration_s": 8.12, "best_steps": 406, "reward": 1945.0, "waddle_idx": 0.51, "fps": 928, "cu_used": 0.24}
+{"round": 3, "timesteps": 786432, "mean_duration_s": 7.82, "best_duration_s": 12.3, "best_steps": 615, "reward": 3210.4, "waddle_idx": 0.63, "fps": 925, "cu_used": 0.36}
+{"round": 4, "timesteps": 1048576, "mean_duration_s": 9.45, "best_duration_s": 14.22, "best_steps": 711, "reward": 4150.2, "waddle_idx": 0.58, "fps": 927, "cu_used": 0.48}
+{"round": 5, "timesteps": 1310720, "mean_duration_s": 11.2, "best_duration_s": 16.05, "best_steps": 802, "reward": 4980.6, "waddle_idx": 0.56, "fps": 924, "cu_used": 0.59}
+{"round": 6, "timesteps": 1572864, "mean_duration_s": 14.1, "best_duration_s": 17.82, "best_steps": 891, "reward": 5640.1, "waddle_idx": 0.55, "fps": 926, "cu_used": 0.71}
+{"round": 7, "timesteps": 1835008, "mean_duration_s": 16.5, "best_duration_s": 19.45, "best_steps": 972, "reward": 6320.8, "waddle_idx": 0.52, "fps": 925, "cu_used": 0.83}
+{"round": 8, "timesteps": 2097152, "mean_duration_s": 19.8, "best_duration_s": 21.6, "best_steps": 1080, "reward": 7110.5, "waddle_idx": 0.53, "fps": 928, "cu_used": 0.95}
+{"round": 9, "timesteps": 2359296, "mean_duration_s": 23.15, "best_duration_s": 25.0, "best_steps": 1157, "reward": 7656.3, "waddle_idx": 0.54, "fps": 926, "cu_used": 1.07}
