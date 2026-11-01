@@ -68,9 +68,8 @@ def evaluate_and_record(
 
     env.resample_commands = False
     obs, _ = env.reset(seed=seed)
-    env.commands[0] = target_vx
-    env.commands[1] = 0.0
-    env.commands[2] = 0.0
+    if target_vx is not None:
+        env.commands[0] = target_vx
     obs = env._get_obs()
 
     frames = []
@@ -126,10 +125,6 @@ def evaluate_and_record(
 
         action, _ = model.predict(obs, deterministic=True)
         obs, rew, term, trunc, info = env.step(action)
-        env.commands[0] = target_vx
-        env.commands[1] = 0.0
-        env.commands[2] = 0.0
-        obs[48:51] = [target_vx, 0.0, 0.0]
 
         if term or trunc:
             print(f"Terminated at step {s} ({time_sec:.2f}s)! Final height: {z:.3f}m, dist: {dist_x:.3f}m")
