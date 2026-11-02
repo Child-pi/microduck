@@ -1,6 +1,6 @@
 # Microduck 訓練狀態與指令保存手冊 (Commands and Status)
 
-**更新時間 (Local Time)**: 2026-11-01T23:12:00+08:00  
+**更新時間 (Local Time)**: 2026-11-02T09:30:00+08:00  
 **專案路徑**: `/Users/childpi/working/microduck_training`  
 **虛擬環境**: `/Users/childpi/working/microduck_training/.venv`  
 
@@ -10,11 +10,13 @@
 
 | 項目 (Item) | 數值 / 狀態 (Value / Status) | 備註 (Notes) |
 | :--- | :--- | :--- |
-| **最新接續訓練最長時間** | **6.90 秒 (345 steps)** | 實測 Seed 87，前進位移 +0.252m |
-| **最新前進推進行走** | **4.46 秒 (223 steps)** | 實測 Seed 3，直線正向位移 **+0.371m** |
-| **歷史封存最佳行走** | **10.52 秒 (526 steps)** | 實測 Seed 89，正向位移 +0.480m |
-| **最新權重** | `checkpoints/microduck_continued_v1.zip` | 包含抗倒退、防暴衝、仿生搖擺步態 |
-| **最新評估影片** | `walk_continued_6_9s.mp4` / `walk_continued_forward_push.mp4` | 640x480 50FPS，帶實時 HUD 遙測數據 |
+| 🥇 **20 秒動態平衡行走** | **20.00 秒 (1,000 steps)** | 實測 Seed 71，連續 1,000 步全程未跌倒 |
+| 🥈 **最新長距前進步態** | **7.22 秒 (361 steps)** | 實測 Seed 99，正向位移 **+0.486m** |
+| 🥉 **最新接續訓練最長時間** | **6.90 秒 (345 steps)** | 實測 Seed 87，前進位移 +0.252m |
+| 🏅 **歷史封存最佳行走** | **10.52 秒 (526 steps)** | 實測 Seed 89，正向位移 +0.480m |
+| **最新權重** | `checkpoints/microduck_endurance_20s.zip` | 整合存活獎勵、防暴衝、防後滑步態 |
+| **最新 20 秒評估影片** | `walk_20s_balance_champion.mp4` | 640x480 50FPS，滿 1,000 幀 HUD 遙測數據 |
+| **最新前進評估影片** | `walk_continued_v2_7_2s.mp4` | 640x480 50FPS，+0.486m 直線位移 |
 | **實機部署 ONNX** | `exported/microduck_10s_champion.onnx` | 符合 Pollen Robotics `robotd` 規範 |
 | **高清評估影片** | `walk_10s_victory.mp4` / `walk_10s_victory.gif` | 含步態 HUD 遙測數據 |
 | **TensorBoard 監控** | 運行於 `http://localhost:6006` | 背景常駐 Task-674 |

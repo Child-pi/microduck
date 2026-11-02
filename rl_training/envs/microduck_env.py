@@ -191,9 +191,9 @@ class MicroduckEnv(gym.Env):
 
         # Command ranges focused on stable, sustained forward locomotion
         self.command_ranges = {
-            "lin_vel_x": (0.00, 0.10),
+            "lin_vel_x": (0.04, 0.08),
             "lin_vel_y": (-0.02, 0.02),
-            "ang_vel_yaw": (-0.15, 0.15),
+            "ang_vel_yaw": (-0.10, 0.10),
         }
         if command_ranges is not None:
             self.command_ranges.update(command_ranges)
@@ -292,16 +292,10 @@ class MicroduckEnv(gym.Env):
         return obs, info
 
     def _sample_commands(self):
-        """Sample velocity and posture commands."""
-        # 10% probability of standing still
-        if self.np_random.random() < 0.10:
-            vx = 0.0
-            vy = 0.0
-            omega = 0.0
-        else:
-            vx = self.np_random.uniform(*self.command_ranges["lin_vel_x"])
-            vy = self.np_random.uniform(*self.command_ranges["lin_vel_y"])
-            omega = self.np_random.uniform(*self.command_ranges["ang_vel_yaw"])
+        """Sample velocity and posture commands for steady sustained forward walking."""
+        vx = self.np_random.uniform(*self.command_ranges["lin_vel_x"])
+        vy = self.np_random.uniform(*self.command_ranges["lin_vel_y"])
+        omega = self.np_random.uniform(*self.command_ranges["ang_vel_yaw"])
 
         self.commands[0] = vx
         self.commands[1] = vy
@@ -438,19 +432,19 @@ class MicroduckEnv(gym.Env):
         rew_progress = 0.0
         if cmd_vx > 0.03:
             if lin_vel_trunk[0] < 0.0:
-                cost_backward_motion = -4.0 * float(abs(lin_vel_trunk[0]))
-            elif lin_vel_trunk[0] < 0.01:
-                cost_stand_still = -0.8
+                cost_backward_motion = -16.0 * float(abs(lin_vel_trunk[0])) - 30.0 * float(lin_vel_trunk[0]**2)
+            elif lin_vel_trunk[0] < 0.015:
+                cost_stand_still = -2.0
             else:
                 rew_progress = float(np.clip(lin_vel_trunk[0] / max(cmd_vx, 0.05), 0.0, 1.25))
         elif cmd_vx < -0.03:
             rew_progress = float(np.clip(lin_vel_trunk[0] / min(cmd_vx, -0.05), 0.0, 1.25))
 
-        # Unwanted excessive lateral drift penalty (permits natural duck waddle sway <= 0.08 m/s)
+        # Unwanted excessive lateral drift penalty (permits natural duck waddle sway <= 0.06 m/s)
         lateral_err = abs(lin_vel_trunk[1] - cmd_vy)
         cost_lateral_vel = 0.0
-        if lateral_err > 0.08:
-            cost_lateral_vel = -3.0 * float(lateral_err - 0.08)**2
+        if lateral_err > 0.06:
+            cost_lateral_vel = -8.0 * float(lateral_err - 0.06)**2
 
         # 3. Official microduck_rl v8 Angular Velocity + Fine Yaw Tracking (eliminates yaw dead-zone!)
         ang_vel_err = float(np.square(ang_vel_trunk[2] - cmd_omega))
@@ -497,11 +491,12 @@ class MicroduckEnv(gym.Env):
             rew_duck_waddle = float(np.exp(-np.square(proj_grav_y - waddle_target) / 0.0045))
 
             # Roll rate tracking matching CPG cadence
-            cost_roll_rate = -0.03 * float(np.square(ang_vel_trunk[0] - waddle_vel_target))
+            cost_roll_rate = -0.08 * float(np.square(ang_vel_trunk[0] - waddle_vel_target))
 
-            # Allow natural waddle sway (|gy| <= 0.16 rad ~ 9.2 deg) without harsh penalty
-            if abs(proj_grav_y) > 0.16:
-                cost_roll_lean = -6.0 * float(abs(proj_grav_y) - 0.16)
+            # Allow natural waddle sway (|gy| <= 0.15 rad ~ 8.6 deg) without harsh penalty
+            if abs(proj_grav_y) > 0.15:
+                excess_roll = abs(proj_grav_y) - 0.15
+                cost_roll_lean = -15.0 * float(excess_roll) - 30.0 * float(excess_roll**2)
             rew_roll = float(np.exp(-np.square(proj_grav_y - waddle_target) / 0.010))
 
             # 5b. Webbed-Foot Stepping & Ground Clearance (target 0.02 m = 2 cm per official recipe)
@@ -602,29 +597,33 @@ class MicroduckEnv(gym.Env):
             cost_forward_lean = -3.0 * float(-proj_grav_x - 0.26)
 
         cost_backward_lean = 0.0
-        if proj_grav_x > 0.20:   # Backward tilt > ~11.5 deg
-            cost_backward_lean = -3.0 * float(proj_grav_x - 0.20)
+        if proj_grav_x > 0.16:   # Backward tilt > ~9.2 deg (prevents backward flip)
+            excess_b = proj_grav_x - 0.16
+            cost_backward_lean = -15.0 * float(excess_b) - 35.0 * float(excess_b**2)
 
-        # Overspeed penalty (prevents runaway acceleration sprinting)
+        # Overspeed quadratic speed corridor (prevents forward sprint surge flip)
         cost_overspeed = 0.0
-        if cmd_vx > 0.03 and lin_vel_trunk[0] > cmd_vx + 0.08:
-            cost_overspeed = -8.0 * float(lin_vel_trunk[0] - (cmd_vx + 0.08))
+        if cmd_vx > 0.03 and lin_vel_trunk[0] > cmd_vx + 0.06:
+            excess_v = lin_vel_trunk[0] - (cmd_vx + 0.06)
+            cost_overspeed = -15.0 * float(excess_v) - 40.0 * float(excess_v**2)
 
         # 6. Active walking endurance bonus (normalized in [0, 1] for steady controlled strides)
         rew_endurance = 0.0
         if (0.03 <= lin_vel_trunk[0] <= cmd_vx + 0.08) and abs(proj_grav_x) < 0.14 and abs(proj_grav_y) < 0.16 and trunk_z > 0.095:
             rew_endurance = 1.0
 
-        # 7. Bounded Survival Milestone Bonus (kept well-scaled so Critic value_loss never explodes)
-        if (trunk_z > 0.090 and abs(proj_grav_x) < 0.14 and abs(proj_grav_y) < 0.18 and 0.02 <= lin_vel_trunk[0] <= cmd_vx + 0.10):
+        # 7. Bounded Survival Milestone Bonus (steep incentive gradient for 20s milestone)
+        if (trunk_z > 0.090 and abs(proj_grav_x) < 0.14 and abs(proj_grav_y) < 0.17 and 0.02 <= lin_vel_trunk[0] <= cmd_vx + 0.10):
             if self.current_step >= 1000:    # 20.0+ 秒突破！
-                rew_survival = 2.0
+                rew_survival = 5.0
             elif self.current_step >= 750:   # 15.0 ~ 20.0 秒
-                rew_survival = 1.5
+                rew_survival = 3.5
             elif self.current_step >= 500:   # 10.0 ~ 15.0 秒
-                rew_survival = 1.0
-            else:                            # 0.0 ~ 10.0 秒
-                rew_survival = 0.5
+                rew_survival = 2.5
+            elif self.current_step >= 250:   # 5.0 ~ 10.0 秒
+                rew_survival = 1.5
+            else:                            # 0.0 ~ 5.0 秒
+                rew_survival = 0.8
         elif trunk_z > 0.085:
             rew_survival = 0.2
         else:
@@ -643,13 +642,16 @@ class MicroduckEnv(gym.Env):
         viol_high = np.maximum(0.0, joint_pos - jnt_ranges[:, 1])
         cost_joint_limits = -2.0 * float(np.sum(viol_low + viol_high))
 
-        cost_termination = -4.0 if terminated else 0.0
+        # Continuous healthy alive bonus & catastrophic termination penalty for 20s endurance
+        rew_alive = 2.5 if (not terminated and trunk_z > 0.080 and is_upright) else 0.0
+        cost_termination = -25.0 if terminated else 0.0
         cost_lin_vel_z = -1.5 * float(np.square(lin_vel_trunk[2]))
         cost_ang_vel_xy = -0.05 * float(np.square(ang_vel_trunk[0]) + np.square(ang_vel_trunk[1]))
 
         # Composite Total Reward (all official v8 + biomimetic terms properly connected & bounded!)
         total_reward = (
-            2.0 * rew_lin_vel           # Official linear velocity tracking (w=2.0)
+            rew_alive                   # Continuous alive bonus (+2.5/step, +2500 for 20s!)
+            + 2.0 * rew_lin_vel         # Official linear velocity tracking (w=2.0)
             + 1.5 * rew_progress        # Forward progress incentive
             + 2.0 * rew_upright         # Official upright stance (w=2.0, fixed single multiply!)
             + 1.5 * rew_pose            # Official leg-only anti-splay pose kernel (hip_roll std=0.05)
@@ -680,6 +682,7 @@ class MicroduckEnv(gym.Env):
         )
 
         reward_info = {
+            "rew_alive": float(rew_alive),
             "rew_lin_vel": float(rew_lin_vel),
             "rew_progress": float(rew_progress),
             "rew_pose": float(rew_pose),
