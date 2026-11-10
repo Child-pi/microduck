@@ -52,7 +52,7 @@ def evaluate_and_record(
     output_video: str = "walk_analysis.mp4",
     output_gif: str = "walk_analysis.gif",
     output_snapshot: str = "walk_snapshot.png",
-    target_vx: float = 0.08,
+    target_vx: float | None = None,
     max_steps: int = 600,
     seed: int = 3,
 ):
@@ -70,7 +70,8 @@ def evaluate_and_record(
     obs, _ = env.reset(seed=seed)
     if target_vx is not None:
         env.commands[0] = target_vx
-    obs = env._get_obs()
+        obs = env._get_obs()
+    cmd_vx = float(env.commands[0])
 
     frames = []
     telemetry = []
@@ -108,7 +109,7 @@ def evaluate_and_record(
         hud = rgb.copy()
         time_sec = s * 0.02
         cv2.putText(hud, f"Time: {time_sec:.2f}s  Step: {s}/{max_steps}  [DUCK GAIT]", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.70, (0, 255, 255), 2)
-        cv2.putText(hud, f"Dist X: {dist_x:+.3f}m  Vel: {linvel[0]:+.2f}m/s (cmd {target_vx:.2f})", (20, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 2)
+        cv2.putText(hud, f"Dist X: {dist_x:+.3f}m  Vel: {linvel[0]:+.2f}m/s (cmd {cmd_vx:.2f})", (20, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 2)
         cv2.putText(hud, f"Height: {z:.3f}m  Roll: {grav[1]:+.2f} (waddle tgt: {waddle_target:+.2f})", (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 2)
         cv2.putText(hud, f"Head Bob: {head_pitch_deg:+.1f} deg  Phase: {phase:.2f} rad", (20, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 255, 200), 2)
 
@@ -189,7 +190,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-video", type=str, default="walk_analysis.mp4")
     parser.add_argument("--output-gif", type=str, default="walk_analysis.gif")
     parser.add_argument("--output-snapshot", type=str, default="walk_snapshot.png")
-    parser.add_argument("--vx", type=float, default=0.08)
+    parser.add_argument("--vx", type=float, default=None)
     parser.add_argument("--max-steps", type=int, default=600)
     parser.add_argument("--seed", type=int, default=3)
     args = parser.parse_args()

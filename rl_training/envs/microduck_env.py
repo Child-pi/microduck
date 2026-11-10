@@ -112,7 +112,8 @@ class MicroduckEnv(gym.Env):
         self,
         model_path: Optional[str] = None,
         frame_skip: int = 10,  # 10 * 0.002s = 0.02s (50 Hz control)
-        action_scale: float = 0.5,  # Reduced from 1.0 to 0.5 for smoother exploration early on
+        action_scale: float = 0.35,  # Sim2Real calibrated 0.35 rad unscale for long-horizon stability
+        action_ema_alpha: float = 0.50,  # Exponential low-pass filter alpha (prevents 50Hz chatter & CoM drift)
         max_episode_steps: int = 1500,  # 1500 steps * 0.02s = 30.0s (enables 20s+ breakthrough!)
         render_mode: Optional[str] = None,
         render_width: int = 640,
@@ -141,6 +142,7 @@ class MicroduckEnv(gym.Env):
         self.frame_skip = frame_skip
         self.dt = self.model.opt.timestep * self.frame_skip
         self.action_scale = action_scale
+        self.action_ema_alpha = action_ema_alpha
         self.max_episode_steps = max_episode_steps
         self.render_mode = render_mode
         self.render_width = render_width
@@ -201,6 +203,7 @@ class MicroduckEnv(gym.Env):
         # State tracking
         self.current_step = 0
         self.last_action = np.zeros(14, dtype=np.float32)
+        self.smoothed_action = np.zeros(14, dtype=np.float32)
         self.commands = np.zeros(13, dtype=np.float32)  # 3 twist + 4 head + 6 body
         self.resample_commands = True
         self.resample_interval = 12.0  # 12 seconds per command phase (600 steps)
@@ -226,6 +229,7 @@ class MicroduckEnv(gym.Env):
         self.current_step = 0
         self.gait_phase = 0.0
         self.last_action[:] = 0.0
+        self.smoothed_action[:] = 0.0
         self.head_bias_ema[:] = 0.0
         self.left_air_time = 0.0
         self.right_air_time = 0.0
@@ -320,7 +324,12 @@ class MicroduckEnv(gym.Env):
         self.commands[12] = 0.0
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        action = np.clip(action, self.action_space.low, self.action_space.high)
+        raw_action = np.clip(action, self.action_space.low, self.action_space.high)
+        self.smoothed_action = (
+            self.action_ema_alpha * raw_action
+            + (1.0 - self.action_ema_alpha) * self.smoothed_action
+        )
+        action = self.smoothed_action
 
         # Target joint position PD control
         target_qpos = DEFAULT_JOINT_POS + self.action_scale * action
@@ -592,13 +601,16 @@ class MicroduckEnv(gym.Env):
         rew_pose = float(np.exp(-np.mean(np.square(leg_q_err))))
 
         # Direct penalty for excessive forward/backward leaning
+        # Note: In MuJoCo trunk frame, forward pitch (nose down toward +X) has proj_grav_x > 0,
+        # while backward pitch (tail down) has proj_grav_x < 0.
         cost_forward_lean = 0.0
-        if proj_grav_x < -0.26:  # Forward tilt > ~15.0 deg
-            cost_forward_lean = -3.0 * float(-proj_grav_x - 0.26)
+        if proj_grav_x > 0.16:   # Forward tilt > ~9.2 deg (prevents forward nose-dive)
+            excess_f = proj_grav_x - 0.16
+            cost_forward_lean = -15.0 * float(excess_f) - 35.0 * float(excess_f**2)
 
         cost_backward_lean = 0.0
-        if proj_grav_x > 0.16:   # Backward tilt > ~9.2 deg (prevents backward flip)
-            excess_b = proj_grav_x - 0.16
+        if proj_grav_x < -0.18:  # Backward tilt > ~10.4 deg (prevents backward flip)
+            excess_b = -proj_grav_x - 0.18
             cost_backward_lean = -15.0 * float(excess_b) - 35.0 * float(excess_b**2)
 
         # Overspeed quadratic speed corridor (prevents forward sprint surge flip)

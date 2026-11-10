@@ -24,16 +24,15 @@ import envs  # Registers Microduck-v0
 def parse_args():
     parser = argparse.ArgumentParser(description="Train Microduck RL Locomotion Policy (PPO)")
     parser.add_argument("--timesteps", type=int, default=1_000_000, help="Total training timesteps (default: 1,000,000)")
-    parser.add_argument("--num-envs", type=int, default=16, help="Number of parallel environments (default: 16 ducks)")
-    parser.add_argument("--lr", type=float, default=3e-5, help="Learning rate (default: 3e-5)")
-    parser.add_argument("--n-steps", type=int, default=1024, help="Steps per environment per PPO update (default: 1024)")
-    parser.add_argument("--batch-size", type=int, default=512, help="Minibatch size (default: 512)")
-    parser.add_argument("--n-epochs", type=int, default=5, help="Number of epochs per update (default: 5 matching microduck_rl)")
-    parser.add_argument("--gamma", type=float, default=0.9985, help="Discount factor (default: 0.9985)")
+    parser.add_argument("--num-envs", type=int, default=4, help="Number of parallel environments (default: 4)")
+    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate (default: 3e-4)")
+    parser.add_argument("--n-steps", type=int, default=2048, help="Steps per environment per PPO update (default: 2048)")
+    parser.add_argument("--batch-size", type=int, default=128, help="Minibatch size (default: 128)")
+    parser.add_argument("--n-epochs", type=int, default=10, help="Number of epochs per update (default: 10)")
+    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor (default: 0.99)")
     parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda (default: 0.95)")
-    parser.add_argument("--clip-range", type=float, default=0.15, help="PPO clip range (default: 0.15)")
-    parser.add_argument("--target-kl", type=float, default=0.015, help="PPO target KL early-stop threshold (default: 0.015)")
-    parser.add_argument("--ent-coef", type=float, default=0.003, help="Entropy coefficient (default: 0.003)")
+    parser.add_argument("--clip-range", type=float, default=0.2, help="PPO clip range (default: 0.2)")
+    parser.add_argument("--ent-coef", type=float, default=0.005, help="Entropy coefficient (default: 0.005)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
     parser.add_argument("--device", type=str, default="auto", help="Compute device ('auto', 'cpu', 'mps')")
     parser.add_argument("--save-freq", type=int, default=50_000, help="Checkpoint frequency in timesteps (default: 50,000)")
@@ -41,7 +40,7 @@ def parse_args():
     parser.add_argument("--log-dir", type=str, default="logs", help="TensorBoard log directory")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints", help="Checkpoints directory")
     parser.add_argument("--resume-from", type=str, default=None, help="Path to checkpoint zip to resume from")
-    parser.add_argument("--action-scale", type=float, default=1.0, help="Action scaling factor (default: 1.0 matching Pollen official)")
+    parser.add_argument("--action-scale", type=float, default=0.35, help="Action scaling factor (default: 0.35 matching Sim2Real & MicroduckEnv)")
     parser.add_argument("--duck-mimic", action="store_true", default=True, help="Enable biomimetic duck waddle, CPG, and head bobbing (default: True)")
     parser.add_argument("--f-duck", type=float, default=1.8, help="Duck stride frequency in Hz (default: 1.8)")
     parser.add_argument("--waddle-amp", type=float, default=0.075, help="Duck waddle roll amplitude in rad (default: 0.075)")
@@ -161,8 +160,12 @@ def main():
             device=args.device,
             tensorboard_log=args.log_dir,
         )
-        model.ent_coef = args.ent_coef
+        from stable_baselines3.common.utils import get_schedule_fn
+        model.lr_schedule = get_schedule_fn(args.lr)
         model.learning_rate = args.lr
+        for param_group in model.policy.optimizer.param_groups:
+            param_group["lr"] = args.lr
+        model.ent_coef = args.ent_coef
         model.gamma = args.gamma
     else:
         model = PPO(
