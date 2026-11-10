@@ -167,6 +167,9 @@ def main():
             param_group["lr"] = args.lr
         model.ent_coef = args.ent_coef
         model.gamma = args.gamma
+        import torch
+        with torch.no_grad():
+            model.policy.log_std.data.clamp_(min=-1.5, max=-0.35)
     else:
         model = PPO(
             "MlpPolicy",
