@@ -114,7 +114,7 @@ class MicroduckEnv(gym.Env):
         frame_skip: int = 10,  # 10 * 0.002s = 0.02s (50 Hz control)
         action_scale: float = 0.35,  # Sim2Real calibrated 0.35 rad unscale for long-horizon stability
         action_ema_alpha: float = 0.50,  # Exponential low-pass filter alpha (prevents 50Hz chatter & CoM drift)
-        max_episode_steps: int = 1500,  # 1500 steps * 0.02s = 30.0s (enables 20s+ breakthrough!)
+        max_episode_steps: int = 4500,  # 4500 steps * 0.02s = 90.0s (enables 5.0m+ continuous duck walking!)
         render_mode: Optional[str] = None,
         render_width: int = 640,
         render_height: int = 480,
@@ -191,11 +191,11 @@ class MicroduckEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(61,), dtype=np.float32
         )
 
-        # Command ranges focused on stable, sustained forward locomotion
+        # Command ranges focused on brisk, sustained 5.0m+ forward duck locomotion
         self.command_ranges = {
-            "lin_vel_x": (0.04, 0.08),
+            "lin_vel_x": (0.12, 0.22),
             "lin_vel_y": (-0.02, 0.02),
-            "ang_vel_yaw": (-0.10, 0.10),
+            "ang_vel_yaw": (-0.08, 0.08),
         }
         if command_ranges is not None:
             self.command_ranges.update(command_ranges)
@@ -613,16 +613,38 @@ class MicroduckEnv(gym.Env):
             excess_b = -proj_grav_x - 0.18
             cost_backward_lean = -15.0 * float(excess_b) - 35.0 * float(excess_b**2)
 
-        # Overspeed quadratic speed corridor (prevents forward sprint surge flip)
+        # Overspeed quadratic speed corridor (permits brisk 5m walking up to cmd_vx + 0.16 m/s)
         cost_overspeed = 0.0
-        if cmd_vx > 0.03 and lin_vel_trunk[0] > cmd_vx + 0.06:
-            excess_v = lin_vel_trunk[0] - (cmd_vx + 0.06)
+        if cmd_vx > 0.03 and lin_vel_trunk[0] > cmd_vx + 0.16:
+            excess_v = lin_vel_trunk[0] - (cmd_vx + 0.16)
             cost_overspeed = -15.0 * float(excess_v) - 40.0 * float(excess_v**2)
 
         # 6. Active walking endurance bonus (normalized in [0, 1] for steady controlled strides)
         rew_endurance = 0.0
-        if (0.03 <= lin_vel_trunk[0] <= cmd_vx + 0.08) and abs(proj_grav_x) < 0.14 and abs(proj_grav_y) < 0.16 and trunk_z > 0.095:
+        if (0.04 <= lin_vel_trunk[0] <= cmd_vx + 0.16) and abs(proj_grav_x) < 0.16 and abs(proj_grav_y) < 0.18 and trunk_z > 0.092:
             rew_endurance = 1.0
+
+        # 6b. World-frame Straight-Line (+X) Velocity & 5-Meter Distance Milestone Ladder
+        vx_world = float(self.data.qvel[0])
+        dist_x = float(self.data.qpos[0])
+        y_pos = float(self.data.qpos[1])
+        w_q, x_q, y_q, z_q = self.data.qpos[3:7]
+        yaw_world = float(np.arctan2(2.0 * (w_q * z_q + x_q * y_q), 1.0 - 2.0 * (y_q * y_q + z_q * z_q)))
+        rew_straight_line = float(np.exp(-np.square(yaw_world) / 0.06) * np.exp(-np.square(y_pos) / 0.08))
+        rew_world_vx = float(np.clip(vx_world / 0.16, -0.5, 2.0))
+        rew_distance_5m = 0.0
+        if is_upright and vx_world > 0.03 and trunk_z > 0.088:
+            rew_distance_5m = 0.8 * float(np.clip(dist_x, 0.0, 6.0))
+            if dist_x >= 5.0:
+                rew_distance_5m += 10.0
+            elif dist_x >= 3.5:
+                rew_distance_5m += 6.0
+            elif dist_x >= 2.0:
+                rew_distance_5m += 4.0
+            elif dist_x >= 1.0:
+                rew_distance_5m += 2.0
+            elif dist_x >= 0.5:
+                rew_distance_5m += 1.0
 
         # 7. Bounded Survival Milestone Bonus (steep incentive gradient for 20s milestone)
         if (trunk_z > 0.090 and abs(proj_grav_x) < 0.14 and abs(proj_grav_y) < 0.17 and 0.02 <= lin_vel_trunk[0] <= cmd_vx + 0.10):
@@ -676,6 +698,9 @@ class MicroduckEnv(gym.Env):
             + 0.6 * rew_duck_crouch     # Low CoM crouch & flat sole
             + 1.2 * rew_endurance       # Steady speed endurance
             + 1.0 * rew_survival        # Bounded survival milestone ladder
+            + 2.5 * rew_world_vx        # World +X forward velocity push for 5m goal
+            + 2.0 * rew_straight_line   # World +X straight-line yaw & centerline corridor
+            + 1.0 * rew_distance_5m     # 5-meter cumulative distance milestone ladder
             + cost_foot_clearance       # 2cm swing foot clearance penalty
             + cost_head_bias            # Official 1.0s EMA head droop penalty
             + cost_forward_lean         # Anti-tipping forward pitch guard
