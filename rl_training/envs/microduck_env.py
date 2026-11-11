@@ -518,14 +518,15 @@ class MicroduckEnv(gym.Env):
             rew_stepping = 0.6 * swing_clearance + 0.4 * stance_solid
 
             # 5c. Rhythmic Head Bobbing (dual-frequency 2*phi: nods once per footstep)
-            head_bob_target = 0.18 + self.duck_head_bob_amp * float(np.cos(2.0 * phi))
+            # Centered around nominal walking head posture (~0.58 rad = 33 deg)
+            head_bob_target = 0.58 + self.duck_head_bob_amp * float(np.cos(2.0 * phi))
             actual_head_pitch = float(joint_pos[5] + joint_pos[6])
-            rew_duck_head_bob = float(np.exp(-np.square(actual_head_pitch - head_bob_target) / 0.015))
+            rew_duck_head_bob = float(np.exp(-np.square(actual_head_pitch - head_bob_target) / 0.025))
             cost_head_wobble = -0.3 * float(joint_pos[7]**2 + joint_pos[8]**2)
 
             # 5d. Duck Crouch: low Center of Mass and knee flexion
             trunk_z = float(self.data.qpos[2])
-            height_err = np.square(trunk_z - 0.112)
+            height_err = np.square(trunk_z - 0.110)
             rew_height = float(np.exp(-height_err / 0.005))
             cost_low_height = 0.0
             if trunk_z < 0.082:
@@ -537,7 +538,8 @@ class MicroduckEnv(gym.Env):
             left_pitch_err = (joint_pos[3] - DEFAULT_JOINT_POS[3]) + (joint_pos[4] - DEFAULT_JOINT_POS[4])
             right_pitch_err = (joint_pos[12] - DEFAULT_JOINT_POS[12]) + (joint_pos[13] - DEFAULT_JOINT_POS[13])
             rew_foot_flat = float(np.exp(-np.square(left_pitch_err) / 0.015) * np.exp(-np.square(right_pitch_err) / 0.015))
-            rew_duck_crouch = 0.5 * float(np.exp(-np.square(joint_pos[3] - 0.12) / 0.04) * np.exp(-np.square(joint_pos[12] + 0.12) / 0.04)) + 0.5 * rew_foot_flat
+            # Symmetrical knee crouch target (+0.10 rad left, -0.10 rad right relative to default)
+            rew_duck_crouch = 0.5 * float(np.exp(-np.square(joint_pos[3] - 0.10) / 0.03) * np.exp(-np.square(joint_pos[12] + 0.10) / 0.03)) + 0.5 * rew_foot_flat
 
             # 5e. Outward Webbed-Foot Stance
             rew_toe_out = float(np.exp(-np.square(joint_pos[0] - 0.035) / 0.02) * np.exp(-np.square(joint_pos[9] + 0.035) / 0.02))
@@ -693,9 +695,9 @@ class MicroduckEnv(gym.Env):
             + 2.0 * rew_yaw_fine        # Official v8 fine yaw tracking (std=0.35, eliminates yaw drift!)
             + 3.0 * rew_air_time        # Official air-time [0.125, 0.300]s (w=3.0, fixed single multiply!)
             + 2.0 * rew_stepping        # Phase contact & swing clearance
-            + 1.0 * rew_duck_waddle     # Biomimetic CPG lateral waddle
-            + 0.8 * rew_duck_head_bob   # Biomimetic rhythmic head bobbing
-            + 0.6 * rew_duck_crouch     # Low CoM crouch & flat sole
+            + 2.2 * rew_duck_waddle     # Biomimetic CPG lateral waddle (boosted for realistic duck sway)
+            + 1.6 * rew_duck_head_bob   # Biomimetic rhythmic head bobbing (boosted for step-synchronized nods)
+            + 1.2 * rew_duck_crouch     # Low CoM crouch & flat sole (boosted for bipedal duck stance)
             + 1.2 * rew_endurance       # Steady speed endurance
             + 1.0 * rew_survival        # Bounded survival milestone ladder
             + 2.5 * rew_world_vx        # World +X forward velocity push for 5m goal
